@@ -1,0 +1,316 @@
+"""
+Endoskop Node — MQTT control + Live Stream + Upload Supabase
+- Live stream MJPEG di http://<ip-pi>:5000/stream  (pasang di <img src="...">)
+- Perintah MQTT: rekam / stop / foto
+- File hasil di-upload ke Supabase Storage
+
+Jalankan: python3 endoskop_node.py
+"""
+
+import os
+import json
+import time
+import threading
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import cv2
+import requests
+import paho.mqtt.client as mqtt
+from flask import Flask, Response
+
+# ====== KONFIGURASI HIVEMQ ======
+BROKER_HOST = os.environ["MQTT_HOST"]
+BROKER_PORT = int(os.getenv("MQTT_PORT", "8883"))
+USERNAME    = os.environ["MQTT_USERNAME"]
+PASSWORD    = os.environ["MQTT_PASSWORD"]
+DEVICE_ID   = os.getenv("DEVICE_ID", "endoskop-01")
+
+# ====== KONFIGURASI KAMERA ======
+CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
+FRAME_WIDTH  = int(os.getenv("FRAME_WIDTH",  "1280"))
+FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "720"))
+VIDEO_FPS    = int(os.getenv("VIDEO_FPS",    "20"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "80"))
+MEDIA_DIR    = os.getenv("MEDIA_DIR", os.path.join(os.path.dirname(__file__), "media"))
+
+# ====== KONFIGURASI STREAM ======
+STREAM_PORT = int(os.getenv("STREAM_PORT", "5000"))
+
+# ====== KONFIGURASI SUPABASE ======
+SUPABASE_URL    = os.environ["SUPABASE_URL"]
+SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "endoskop-media")
+
+TOPIC_STATUS  = f"endoskop/{DEVICE_ID}/status"
+TOPIC_COMMAND = f"endoskop/{DEVICE_ID}/command"
+TOPIC_EVENT   = f"endoskop/{DEVICE_ID}/event"
+
+
+def upload_to_supabase(local_path):
+    filename = os.path.basename(local_path)
+    storage_path = f"{DEVICE_ID}/{filename}"
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{storage_path}"
+    try:
+        with open(local_path, "rb") as f:
+            data = f.read()
+        headers = {
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/octet-stream",
+            "x-upsert": "true",
+        }
+        r = requests.post(url, headers=headers, data=data, timeout=30)
+        if r.status_code in (200, 201):
+            print(f"-> Upload sukses: {storage_path}")
+            return storage_path
+        print(f"-> Upload GAGAL ({r.status_code}): {r.text}")
+        return None
+    except Exception as e:
+        print(f"-> Upload error: {e}")
+        return None
+
+
+class CameraController:
+    def __init__(self, publish_event):
+        self.publish_event = publish_event
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+
+        self.cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+
+        # Baca resolusi aktual (kamera bisa saja tidak support FRAME_WIDTH x FRAME_HEIGHT)
+        self.actual_width  = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or FRAME_WIDTH
+        self.actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or FRAME_HEIGHT
+
+        self.running = True
+        self.recording = False
+        self.writer = None
+        self.record_path = None
+        self.record_start = None
+
+        # frame terbaru — dipakai bareng oleh stream server
+        self.latest_jpeg = None
+        self._frame_lock = threading.Lock()
+
+        # flag perintah
+        self._start_req = False
+        self._stop_req = False
+        self._snap_req = False
+        self._lock = threading.Lock()
+
+    def request_start(self):
+        with self._lock: self._start_req = True
+    def request_stop(self):
+        with self._lock: self._stop_req = True
+    def request_snapshot(self):
+        with self._lock: self._snap_req = True
+
+    def get_latest_jpeg(self):
+        with self._frame_lock:
+            return self.latest_jpeg
+
+    def run(self):
+        if not self.cap.isOpened():
+            print("ERROR: kamera tidak bisa dibuka.")
+            self.publish_event({"event": "error", "detail": "camera_open_failed"})
+            return
+
+        print(f"Kamera siap. Resolusi: {self.actual_width}x{self.actual_height} @ {VIDEO_FPS}fps")
+        print("Live stream + menunggu perintah...")
+        while self.running:
+            ok, frame = self.cap.read()
+            if not ok:
+                continue
+
+            # update frame terbaru untuk live stream
+            ok_enc, buf = cv2.imencode(
+                '.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+            )
+            if ok_enc:
+                with self._frame_lock:
+                    self.latest_jpeg = buf.tobytes()
+
+            # baca flag perintah
+            with self._lock:
+                start_req = self._start_req
+                stop_req = self._stop_req
+                snap_req = self._snap_req
+                self._start_req = self._stop_req = self._snap_req = False
+
+            if snap_req: self._do_snapshot(frame)
+            if start_req: self._do_start()
+            if stop_req: self._do_stop()
+
+            if self.recording and self.writer is not None:
+                self.writer.write(frame)
+
+        if self.recording:
+            self._do_stop()
+        self.cap.release()
+        print("Kamera dilepas.")
+
+    def _do_snapshot(self, frame):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(MEDIA_DIR, f"foto_{ts}.jpg")
+        cv2.imwrite(path, frame)
+        print(f"-> Foto disimpan: {path}")
+        storage_path = upload_to_supabase(path)
+        self.publish_event({
+            "event": "snapshot_taken",
+            "file": path,
+            "storage_path": storage_path,
+        })
+
+    def _do_start(self):
+        if self.recording:
+            print("-> Sudah merekam, perintah diabaikan.")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.record_path = os.path.join(MEDIA_DIR, f"rekaman_{ts}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.writer = cv2.VideoWriter(
+            self.record_path, fourcc, VIDEO_FPS, (self.actual_width, self.actual_height)
+        )
+        if not self.writer.isOpened():
+            print(f"-> ERROR: VideoWriter gagal dibuka untuk {self.record_path}")
+            self.writer = None
+            return
+        self.recording = True
+        self.record_start = time.time()
+        print(f"-> Mulai merekam: {self.record_path} ({self.actual_width}x{self.actual_height})")
+        self.publish_event({"event": "recording_started", "file": self.record_path})
+
+    def _do_stop(self):
+        if not self.recording:
+            print("-> Tidak sedang merekam, perintah diabaikan.")
+            return
+        self.recording = False
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+        durasi = round(time.time() - self.record_start, 1)
+        print(f"-> Berhenti merekam. Durasi {durasi}s")
+        storage_path = upload_to_supabase(self.record_path)
+        self.publish_event({
+            "event": "recording_stopped",
+            "file": self.record_path,
+            "storage_path": storage_path,
+            "duration_sec": durasi,
+        })
+
+    def stop(self):
+        self.running = False
+
+
+# ====== Live Stream Server (Flask) ======
+app = Flask(__name__)
+camera = None  # diisi di main()
+
+
+def mjpeg_generator():
+    while True:
+        jpeg = camera.get_latest_jpeg()
+        if jpeg is None:
+            time.sleep(0.05)
+            continue
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
+        time.sleep(1 / 30)  # cap ~30 fps di stream
+
+
+@app.route('/stream')
+def stream():
+    return Response(
+        mjpeg_generator(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+@app.route('/snapshot')
+def snapshot():
+    jpeg = camera.get_latest_jpeg()
+    if jpeg is None:
+        return Response(status=503)
+    return Response(jpeg, mimetype='image/jpeg',
+                    headers={'Cache-Control': 'no-cache, no-store'})
+
+@app.route('/health')
+def health():
+    return {"ok": True, "device": DEVICE_ID}
+
+
+def run_stream_server():
+    # threaded=True biar bisa melayani banyak penonton sekaligus
+    app.run(host='0.0.0.0', port=STREAM_PORT, threaded=True,
+            debug=False, use_reloader=False)
+
+
+# ====== MQTT ======
+def publish_event(payload):
+    client.publish(TOPIC_EVENT, json.dumps(payload), qos=1)
+
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Terhubung ke broker MQTT!")
+        client.publish(TOPIC_STATUS, json.dumps({"status": "online"}),
+                       qos=1, retain=True)
+        client.subscribe(TOPIC_COMMAND, qos=1)
+        print(f"Mendengarkan perintah di: {TOPIC_COMMAND}")
+    else:
+        print(f"Gagal connect, kode error: {rc}")
+
+
+def on_message(client, userdata, msg):
+    payload = msg.payload.decode()
+    print(f"Pesan masuk [{msg.topic}]: {payload}")
+    try:
+        data = json.loads(payload)
+        cmd = data.get("cmd")
+        if cmd == "rekam": camera.request_start()
+        elif cmd == "stop": camera.request_stop()
+        elif cmd == "foto": camera.request_snapshot()
+        else: print(f"-> Perintah tidak dikenal: {cmd}")
+    except json.JSONDecodeError:
+        print("-> Pesan bukan JSON valid, diabaikan.")
+
+
+client = mqtt.Client(client_id=DEVICE_ID)
+client.username_pw_set(USERNAME, PASSWORD)
+client.tls_set()
+client.will_set(TOPIC_STATUS, json.dumps({"status": "offline"}),
+                qos=1, retain=True)
+client.on_connect = on_connect
+client.on_message = on_message
+
+
+def main():
+    global camera
+    camera = CameraController(publish_event)
+
+    # Thread 1: kamera loop
+    threading.Thread(target=camera.run, daemon=True).start()
+    # Thread 2: Flask live stream server
+    threading.Thread(target=run_stream_server, daemon=True).start()
+    print(f"Live stream: http://0.0.0.0:{STREAM_PORT}/stream")
+
+    print("Menghubungkan ke broker...")
+    client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
+
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("\nMenutup...")
+        camera.stop()
+        time.sleep(1)
+        client.publish(TOPIC_STATUS, json.dumps({"status": "offline"}),
+                       qos=1, retain=True)
+        client.disconnect()
+
+
+if __name__ == "__main__":
+    main()

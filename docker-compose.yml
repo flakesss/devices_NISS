@@ -1,0 +1,23 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: niss-mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: niss-backend
+    ports:
+      - "3000:3000"
+    env_file: ./backend/.env
+    environment:
+      - MQTT_URL=mqtt://mosquitto:1883   # override .env — pakai nama service, bukan localhost
+    volumes:
+      - ./frontend/dist:/frontend/dist:ro  # frontend yang sudah di-build
+    depends_on:
+      - mosquitto
+    restart: unless-stopped

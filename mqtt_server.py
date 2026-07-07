@@ -21,11 +21,11 @@ import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, Response
 
-# ====== KONFIGURASI HIVEMQ ======
+# ====== KONFIGURASI BROKER MQTT ======
 BROKER_HOST = os.environ["MQTT_HOST"]
-BROKER_PORT = int(os.getenv("MQTT_PORT", "8883"))
-USERNAME    = os.environ["MQTT_USERNAME"]
-PASSWORD    = os.environ["MQTT_PASSWORD"]
+BROKER_PORT = int(os.getenv("MQTT_PORT", "1883"))
+USERNAME    = os.getenv("MQTT_USERNAME")   # opsional — kosongkan jika broker lokal
+PASSWORD    = os.getenv("MQTT_PASSWORD")   # opsional — kosongkan jika broker lokal
 DEVICE_ID   = os.getenv("DEVICE_ID", "endoskop-01")
 
 # ====== KONFIGURASI KAMERA ======
@@ -280,8 +280,9 @@ def on_message(client, userdata, msg):
 
 
 client = mqtt.Client(client_id=DEVICE_ID)
-client.username_pw_set(USERNAME, PASSWORD)
-client.tls_set()
+if USERNAME and PASSWORD:
+    client.username_pw_set(USERNAME, PASSWORD)
+    client.tls_set()
 client.will_set(TOPIC_STATUS, json.dumps({"status": "offline"}),
                 qos=1, retain=True)
 client.on_connect = on_connect

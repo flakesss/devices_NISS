@@ -2,6 +2,26 @@
 
 Script Python yang berjalan di Raspberry Pi sebagai node perangkat endoskopi. Mengontrol kamera USB, menyiarkan live stream MJPEG, merekam video/foto, mengupload ke Supabase Storage, dan berkomunikasi lewat MQTT.
 
+## Arsitektur Sistem
+
+```
+Browser / Frontend (Vercel)
+        │  HTTPS
+        ▼
+  app.satsetin.com
+  (Cloudflare Tunnel)
+        │
+        ▼
+  Docker Compose (PC Lab / Pi)
+  ├── backend (Node.js :3000)
+  ├── mosquitto (MQTT :1883)
+  └── cloudflared (tunnel ke Cloudflare)
+        │
+        ▼
+  mqtt_server.py + Flask Stream (:5000)
+  (jalan native di host / Pi)
+```
+
 ## Fitur
 
 - **Live stream** MJPEG di `http://<ip-pi>:5000/stream`
@@ -9,7 +29,7 @@ Script Python yang berjalan di Raspberry Pi sebagai node perangkat endoskopi. Me
 - **Rekam video** ke MP4 (mp4v) via perintah MQTT
 - **Ambil foto** JPEG via perintah MQTT
 - **Upload otomatis** ke Supabase Storage setelah rekam/foto selesai
-- **Publikasi event** ke broker MQTT (HiveMQ) untuk notifikasi backend
+- **Publikasi event** ke broker MQTT (Mosquitto lokal) untuk notifikasi backend
 
 ## Prasyarat
 
@@ -64,13 +84,37 @@ python3 mqtt_server.py
 
 ### Dengan PM2 (direkomendasikan, auto-restart)
 
-Gunakan `ecosystem.config.js` dari repo backend NISS:
+Gunakan `ecosystem.config.js` di root repo ini:
 
 ```bash
-cd website/backend
 pm2 start ecosystem.config.js --only niss-camera
 pm2 save
+pm2 startup  # ikuti instruksi untuk auto-start saat boot
 ```
+
+## Docker Compose (Backend + Mosquitto + Tunnel)
+
+Untuk menjalankan backend, broker MQTT, dan Cloudflare Tunnel sekaligus:
+
+```bash
+# Salin dan isi file .env
+cp .env.example .env
+
+# Jalankan semua service
+docker compose up -d
+
+# Cek status
+docker compose ps
+docker logs niss-cloudflared
+```
+
+### Konfigurasi `.env` (root repo)
+
+```env
+CLOUDFLARE_TOKEN=<token dari Cloudflare Zero Trust dashboard>
+```
+
+Token didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
 
 ## Perintah MQTT
 
@@ -126,4 +170,5 @@ Setelah script berjalan:
 | Video rekaman 0 frame / file kecil | Resolusi VideoWriter tidak cocok dengan output kamera — resolusi kini auto-detect dari kamera aktual |
 | Upload gagal | Pastikan `SUPABASE_KEY` adalah **service_role** key, cek koneksi internet |
 | Flask port 5000 sudah dipakai | Ganti `STREAM_PORT` di konfigurasi |
-| Tidak terhubung ke MQTT | Cek `BROKER_HOST`, `USERNAME`, `PASSWORD`, dan pastikan port 8883 tidak diblokir firewall |
+| Tidak terhubung ke MQTT | Pastikan Mosquitto Docker jalan (`docker compose ps`) dan `MQTT_URL=mqtt://mosquitto:1883` di backend |
+| Cloudflare tunnel tidak connect | Cek `docker logs niss-cloudflared` — pastikan `CLOUDFLARE_TOKEN` di `.env` sudah benar |

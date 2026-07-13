@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare Access TCP proxy - forward local 1883 to mqtt.satsetin.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/cloudflared access tcp --hostname mqtt.satsetin.com --url localhost:1883
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target

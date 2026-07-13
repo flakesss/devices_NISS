@@ -1,0 +1,7 @@
+tunnel: 78e2297a-4d7c-4e62-bf05-c7528eab8da4
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: mqtt.satsetin.com
+    service: tcp://mosquitto:1883
+  - service: http_status:404

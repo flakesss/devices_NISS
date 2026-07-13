@@ -1,0 +1,7 @@
+tunnel: e06d6d4d-0e21-4c25-976e-20aef64f7b4a
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: pi-stream.satsetin.com
+    service: http://localhost:5000
+  - service: http_status:404

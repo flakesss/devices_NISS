@@ -4,23 +4,37 @@ Script Python yang berjalan di Raspberry Pi sebagai node perangkat endoskopi. Me
 
 ## Arsitektur Sistem
 
+Pi (device kamera) dan Docker Compose (backend + broker) bisa jalan di
+**jaringan/lokasi yang berbeda**. Semua koneksi antar keduanya lewat Cloudflare
+Tunnel, tidak bergantung pada IP LAN:
+
 ```
 Browser / Frontend (Vercel)
         │  HTTPS
         ▼
-  app.satsetin.com
-  (Cloudflare Tunnel)
+  app.satsetin.com  (tunnel: NISS)
         │
         ▼
-  Docker Compose (PC Lab / Pi)
+  Docker Compose (PC Lab)
   ├── backend (Node.js :3000)
   ├── mosquitto (MQTT :1883)
-  └── cloudflared (tunnel ke Cloudflare)
+  ├── cloudflared        → tunnel "NISS"        (expose backend)
+  └── cloudflared-mqtt   → tunnel "niss-mqtt"   (expose mosquitto:1883)
+        │                         ▲
+        │ PI_STREAM_URL           │ mqtt.satsetin.com
+        ▼                         │
+  pi-stream.satsetin.com   cloudflared access tcp (Pi)
+  (tunnel: niss-pi-stream)        │ → localhost:1883
+        ▲                         ▼
+        │                  mqtt_server.py (MQTT_HOST=localhost:1883)
+  cloudflared (Pi, expose :5000)
         │
         ▼
-  mqtt_server.py + Flask Stream (:5000)
-  (jalan native di host / Pi)
+  mqtt_server.py + Flask Stream (:5000)  (jalan native di Pi)
 ```
+
+Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
+[`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md).
 
 ## Fitur
 
@@ -54,10 +68,15 @@ cp .env.example .env
 Isi `.env`:
 
 ```env
-MQTT_HOST=xxxxxxxx.s1.eu.hivemq.cloud
-MQTT_PORT=8883
-MQTT_USERNAME=your_username
-MQTT_PASSWORD=your_password
+# Pi & broker satu LAN yang sama:
+MQTT_HOST=localhost
+MQTT_PORT=1883
+
+# Pi & broker beda jaringan/lokasi (lihat pi-tunnel-setup/README.md):
+# jalankan `cloudflared access tcp --hostname mqtt.satsetin.com --url localhost:1883`
+# lalu MQTT_HOST tetap localhost:1883 (proxy lokal yang meneruskan ke tunnel)
+MQTT_USERNAME=
+MQTT_PASSWORD=
 DEVICE_ID=endoskop-01
 
 CAMERA_INDEX=0
@@ -73,6 +92,9 @@ SUPABASE_BUCKET=endoskop-media
 ```
 
 > Resolusi aktual kamera terdeteksi otomatis saat startup. Cek log untuk melihat resolusi yang digunakan.
+>
+> `MQTT_USERNAME`/`MQTT_PASSWORD` dikosongkan karena broker Mosquitto lokal
+> dikonfigurasi `allow_anonymous true` (lihat `mosquitto/config/mosquitto.conf`).
 
 ## Menjalankan
 
@@ -115,6 +137,28 @@ CLOUDFLARE_TOKEN=<token dari Cloudflare Zero Trust dashboard>
 ```
 
 Token didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
+
+## Menjalankan Pi di Jaringan/Lokasi Berbeda
+
+Kalau Pi tidak berada di LAN yang sama dengan PC lab (tempat `docker compose up`
+dijalankan), broker MQTT dan Flask stream perlu diekspos lewat Cloudflare Tunnel
+supaya tetap saling terhubung dari jaringan manapun. Ada 2 tunnel tambahan yang
+perlu di-setup di sisi Pi:
+
+1. **`niss-pi-stream`** — expose Flask stream Pi (`:5000`) ke
+   `https://pi-stream.satsetin.com`, supaya backend di PC lab bisa akses live
+   stream Pi walau beda jaringan.
+2. **`niss-mqtt` (client-side)** — proxy `cloudflared access tcp` di Pi supaya
+   `mqtt_server.py` bisa connect ke broker Mosquitto di PC lab lewat
+   `mqtt.satsetin.com`, meski MQTT adalah protokol TCP mentah yang tidak bisa
+   langsung diakses seperti HTTP.
+
+Instruksi lengkap instalasi & systemd service untuk keduanya ada di
+**[`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md)**.
+
+Kalau Pi & PC lab satu LAN, langkah ini **tidak diperlukan** — cukup pakai IP
+LAN langsung (`MQTT_HOST=<ip-lan-pc-lab>`, dan `PI_STREAM_URL=http://<ip-lan-pi>:5000/stream`
+di `.env` backend).
 
 ## Perintah MQTT
 
@@ -172,3 +216,5 @@ Setelah script berjalan:
 | Flask port 5000 sudah dipakai | Ganti `STREAM_PORT` di konfigurasi |
 | Tidak terhubung ke MQTT | Pastikan Mosquitto Docker jalan (`docker compose ps`) dan `MQTT_URL=mqtt://mosquitto:1883` di backend |
 | Cloudflare tunnel tidak connect | Cek `docker logs niss-cloudflared` — pastikan `CLOUDFLARE_TOKEN` di `.env` sudah benar |
+| Pi beda jaringan tidak connect ke MQTT | Cek service `cloudflared-mqtt-proxy` di Pi (`systemctl status cloudflared-mqtt-proxy`), dan `docker logs niss-cloudflared-mqtt` di PC lab — lihat [`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md) |
+| Live stream Pi (beda jaringan) tidak muncul di web | Cek tunnel `niss-pi-stream` aktif di Pi (`systemctl status cloudflared`) dan `PI_STREAM_URL=https://pi-stream.satsetin.com/stream` di `.env` backend |

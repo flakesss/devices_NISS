@@ -28,10 +28,9 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: niss-cloudflared
-    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
-    volumes:
-      - ./cloudflared-backend/config.yml:/etc/cloudflared/config.yml:ro
-      - ./cloudflared-backend/credentials.json:/etc/cloudflared/credentials.json:ro
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TOKEN}
     depends_on:
       - backend
     restart: unless-stopped

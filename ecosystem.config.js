@@ -10,8 +10,8 @@ module.exports = {
       watch: false,
       log_date_format: "YYYY-MM-DD HH:mm:ss",
     },
-    // niss-tunnel (Cloudflare Quick Tunnel via PM2) dihapus — digantikan Named
-    // Tunnel "niss-backend" (api.satsetin.com) yang jalan sebagai service
-    // "cloudflared" di docker-compose.yml, auto-restart via restart: unless-stopped.
+    // niss-tunnel (Cloudflare Quick Tunnel via PM2) dihapus — digantikan tunnel
+    // "NISS" (app.satsetin.com) yang jalan sebagai service "cloudflared" di
+    // docker-compose.yml, auto-restart via restart: unless-stopped.
   ],
 };

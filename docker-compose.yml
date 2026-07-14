@@ -16,7 +16,7 @@ services:
     env_file: ./backend/.env
     environment:
       - MQTT_URL=mqtt://mosquitto:1883   # override .env — pakai nama service, bukan localhost
-      - PI_STREAM_URL=http://host.docker.internal:5000/stream   # Flask stream jalan native di Pi yang sama, tidak perlu tunnel
+      - PI_STREAM_URL=https://pi-stream.satsetin.com/stream   # Pi di jaringan/lokasi berbeda dari PC lab — diakses lewat Cloudflare Tunnel niss-pi-stream
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -36,6 +36,15 @@ services:
       - backend
     restart: unless-stopped
 
-  # cloudflared-mqtt dinonaktifkan: broker Mosquitto dan mqtt_server.py (kamera)
-  # jalan di Pi yang sama, jadi tidak perlu expose MQTT ke internet.
-  # Aktifkan lagi kalau nanti ada device kamera di jaringan/lokasi terpisah.
+  # Expose Mosquitto (MQTT broker) ke internet lewat Cloudflare Tunnel,
+  # supaya Pi di jaringan/lokasi berbeda tetap bisa connect ke broker ini.
+  cloudflared-mqtt:
+    image: cloudflare/cloudflared:latest
+    container_name: niss-cloudflared-mqtt
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared-mqtt/config.yml:/etc/cloudflared/config.yml:ro
+      - ./cloudflared-mqtt/credentials.json:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      - mosquitto
+    restart: unless-stopped

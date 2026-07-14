@@ -1,0 +1,7 @@
+tunnel: 4776c3a2-e215-4efc-977d-0e11343ed484
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: api.satsetin.com
+    service: http://backend:3000
+  - service: http_status:404

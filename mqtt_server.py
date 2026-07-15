@@ -243,6 +243,15 @@ def health():
     return {"ok": True, "device": DEVICE_ID}
 
 
+@app.route('/info')
+def info():
+    return {
+        "width": camera.actual_width,
+        "height": camera.actual_height,
+        "fps": VIDEO_FPS,
+    }
+
+
 def run_stream_server():
     # threaded=True biar bisa melayani banyak penonton sekaligus
     app.run(host='0.0.0.0', port=STREAM_PORT, threaded=True,

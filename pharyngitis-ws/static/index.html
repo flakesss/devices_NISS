@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pharyngitis Detector - WebSocket demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background:#111; color:#eee; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  video, canvas { width: 100%; border-radius: 8px; background:#000; }
+  canvas { display:none; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0; }
+  button { padding:8px 16px; border:0; border-radius:6px; background:#2d7; color:#062; font-weight:600; cursor:pointer; }
+  button.stop { background:#e55; color:#fff; }
+  .result { font-size:1.4rem; font-weight:700; margin-top:8px; }
+  .muted { color:#999; font-size:.85rem; }
+  input { padding:6px; border-radius:6px; border:1px solid #444; background:#222; color:#eee; }
+  .bar { height:10px; border-radius:5px; background:#333; overflow:hidden; }
+  .bar > div { height:100%; background:#2d7; width:0%; transition:width .1s; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pharyngitis Detector - realtime (WebSocket)</h1>
+  <p class="muted">Streams webcam frames to the server and shows live predictions.
+     Prototype only - not a medical device.</p>
+
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" class="stop">Stop</button>
+    <label class="muted">FPS: <input id="fps" type="number" value="3" min="1" max="15" style="width:56px" /></label>
+    <label class="muted">token: <input id="token" type="text" placeholder="optional" style="width:120px" /></label>
+  </div>
+
+  <div class="result" id="pred">-</div>
+  <div class="bar"><div id="confbar"></div></div>
+  <div class="muted" id="stats"></div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const predEl = document.getElementById('pred');
+const confbar = document.getElementById('confbar');
+const stats = document.getElementById('stats');
+let ws = null, timer = null, stream = null, sending = false;
+
+async function start() {
+  stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  video.srcObject = stream;
+  await video.play();
+  canvas.width = 224; canvas.height = 224;
+
+  const token = document.getElementById('token').value.trim();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  let url = `${proto}://${location.host}/ws/predict`;
+  if (token) url += `?token=${encodeURIComponent(token)}`;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    const fps = Math.max(1, Math.min(15, +document.getElementById('fps').value || 3));
+    timer = setInterval(sendFrame, 1000 / fps);
+  };
+  ws.onmessage = (ev) => {
+    sending = false;
+    const r = JSON.parse(ev.data);
+    if (r.error) { predEl.textContent = 'error: ' + r.error; return; }
+    const isPhar = r.prediction === 'pharyngitis';
+    predEl.textContent = `${r.prediction}  (${(r.confidence * 100).toFixed(1)}%)`;
+    predEl.style.color = isPhar ? '#e55' : '#2d7';
+    confbar.style.width = (r.confidence * 100) + '%';
+    confbar.style.background = isPhar ? '#e55' : '#2d7';
+    stats.textContent = `frame ${r.frame} | server ${r.latency_ms} ms`;
+  };
+  ws.onclose = () => { predEl.textContent = 'disconnected'; };
+}
+
+function sendFrame() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || sending) return;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    blob.arrayBuffer().then((buf) => { sending = true; ws.send(buf); });
+  }, 'image/jpeg', 0.8);
+}
+
+function stop() {
+  if (timer) clearInterval(timer);
+  if (ws) ws.close();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  timer = ws = stream = null;
+}
+
+document.getElementById('startBtn').onclick = start;
+document.getElementById('stopBtn').onclick = stop;
+</script>
+</body>
+</html>

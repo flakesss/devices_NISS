@@ -17,12 +17,23 @@ services:
     environment:
       - MQTT_URL=mqtt://mosquitto:1883   # override .env — pakai nama service, bukan localhost
       - PI_STREAM_URL=https://pi-stream.satsetin.com/stream   # Pi di jaringan/lokasi berbeda dari PC lab — diakses lewat Cloudflare Tunnel niss-pi-stream
+      - PHARYNGITIS_URL=http://pharyngitis-ws:8000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./frontend/dist:/frontend/dist:ro  # frontend yang sudah di-build
     depends_on:
       - mosquitto
+      - pharyngitis-ws
+    restart: unless-stopped
+
+  # Deteksi faringitis dari foto/snapshot, dipicu on-demand oleh tombol
+  # "Analisis" di frontend (bukan otomatis tiap frame) — model DenseNet121.
+  pharyngitis-ws:
+    build: ./pharyngitis-ws
+    container_name: niss-pharyngitis-ws
+    expose:
+      - "8000"
     restart: unless-stopped
 
   cloudflared:

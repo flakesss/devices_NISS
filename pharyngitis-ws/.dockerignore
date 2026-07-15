@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+pi_client.py
+README.md
+.git/

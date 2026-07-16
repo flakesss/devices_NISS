@@ -21,6 +21,8 @@ import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, Response
 
+import cs_codec
+
 # ====== KONFIGURASI BROKER MQTT ======
 BROKER_HOST = os.environ["MQTT_HOST"]
 BROKER_PORT = int(os.getenv("MQTT_PORT", "1883"))
@@ -35,6 +37,10 @@ FRAME_HEIGHT = int(os.getenv("FRAME_HEIGHT", "720"))
 VIDEO_FPS    = int(os.getenv("VIDEO_FPS",    "20"))
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "80"))
 MEDIA_DIR    = os.getenv("MEDIA_DIR", os.path.join(os.path.dirname(__file__), "media"))
+
+# ====== KONFIGURASI COMPRESSIVE SENSING (opsional, endpoint _cs) ======
+CS_BLOCK_SIZE = int(os.getenv("CS_BLOCK_SIZE", str(cs_codec.CS_BLOCK_SIZE)))
+CS_MR_PERCENT = int(os.getenv("CS_MR_PERCENT", str(cs_codec.CS_MR_PERCENT)))
 
 # ====== KONFIGURASI STREAM ======
 STREAM_PORT = int(os.getenv("STREAM_PORT", "5000"))
@@ -95,6 +101,7 @@ class CameraController:
 
         # frame terbaru — dipakai bareng oleh stream server
         self.latest_jpeg = None
+        self.latest_cs_payload = None
         self._frame_lock = threading.Lock()
 
         # flag perintah
@@ -113,6 +120,10 @@ class CameraController:
     def get_latest_jpeg(self):
         with self._frame_lock:
             return self.latest_jpeg
+
+    def get_latest_cs_payload(self):
+        with self._frame_lock:
+            return self.latest_cs_payload
 
     def run(self):
         if not self.cap.isOpened():
@@ -134,6 +145,13 @@ class CameraController:
             if ok_enc:
                 with self._frame_lock:
                     self.latest_jpeg = buf.tobytes()
+
+            # payload Compressive Sensing (measurement belum direkonstruksi) —
+            # dikirim lewat /snapshot_cs & /stream_cs, opsional/paralel dengan JPEG
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cs_payload = cs_codec.encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
+            with self._frame_lock:
+                self.latest_cs_payload = cs_payload
 
             # baca flag perintah
             with self._lock:
@@ -241,6 +259,33 @@ def snapshot():
 @app.route('/health')
 def health():
     return {"ok": True, "device": DEVICE_ID}
+
+
+def cs_generator():
+    while True:
+        payload = camera.get_latest_cs_payload()
+        if payload is None:
+            time.sleep(0.05)
+            continue
+        yield (b'--frame\r\nContent-Type: application/octet-stream\r\n\r\n' + payload + b'\r\n')
+        time.sleep(1 / 30)
+
+
+@app.route('/snapshot_cs')
+def snapshot_cs():
+    payload = camera.get_latest_cs_payload()
+    if payload is None:
+        return Response(status=503)
+    return Response(payload, mimetype='application/octet-stream',
+                    headers={'Cache-Control': 'no-cache, no-store'})
+
+
+@app.route('/stream_cs')
+def stream_cs():
+    return Response(
+        cs_generator(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
 
 
 @app.route('/info')

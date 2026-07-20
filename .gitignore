@@ -7,3 +7,4 @@ venv/
 /frontend
 cloudflared-mqtt/credentials.json
 pi-tunnel-setup/credentials.json
+aes_key.bin

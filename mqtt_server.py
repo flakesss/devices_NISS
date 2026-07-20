@@ -3,7 +3,10 @@ Endoskop Node — MQTT control + Live Stream + Upload Supabase
 - Live stream MJPEG di http://<ip-pi>:5000/stream  (pasang di <img src="...">)
 - Perintah MQTT: rekam / stop / foto
 - File hasil di-upload ke Supabase Storage
+<<<<<<< HEAD
 - Payload MQTT dienkripsi dengan AES-128-GCM (kerahasiaan + integritas)
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 Jalankan: python3 endoskop_node.py
 """
@@ -23,7 +26,10 @@ import paho.mqtt.client as mqtt
 from flask import Flask, Response
 
 import cs_codec
+<<<<<<< HEAD
 import aes_utils
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 # ====== KONFIGURASI BROKER MQTT ======
 BROKER_HOST = os.environ["MQTT_HOST"]
@@ -47,12 +53,15 @@ CS_MR_PERCENT = int(os.getenv("CS_MR_PERCENT", str(cs_codec.CS_MR_PERCENT)))
 # ====== KONFIGURASI STREAM ======
 STREAM_PORT = int(os.getenv("STREAM_PORT", "5000"))
 
+<<<<<<< HEAD
 # ====== INISIALISASI AES-128-GCM ======
 # Key dimuat sekali saat startup — persisten dari env var atau aes_key.bin.
 # Raspberry Pi 4 (BCM2711) tidak punya hardware AES accelerator;
 # semua operasi AES berjalan software-only (tetap <1ms untuk data kecil).
 aes_utils.load_key()
 
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 # ====== KONFIGURASI SUPABASE ======
 SUPABASE_URL    = os.environ["SUPABASE_URL"]
 SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
@@ -313,17 +322,25 @@ def run_stream_server():
 
 # ====== MQTT ======
 def publish_event(payload):
+<<<<<<< HEAD
     # Enkripsi event sebelum publish — GCM auth tag menjamin integritas
     encrypted = aes_utils.encrypt_json(payload)
     client.publish(TOPIC_EVENT, encrypted, qos=1)
+=======
+    client.publish(TOPIC_EVENT, json.dumps(payload), qos=1)
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Terhubung ke broker MQTT!")
+<<<<<<< HEAD
         # Enkripsi status online — backend akan mendekripsinya
         encrypted_status = aes_utils.encrypt_json({"status": "online"})
         client.publish(TOPIC_STATUS, encrypted_status,
+=======
+        client.publish(TOPIC_STATUS, json.dumps({"status": "online"}),
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
                        qos=1, retain=True)
         client.subscribe(TOPIC_COMMAND, qos=1)
         print(f"Mendengarkan perintah di: {TOPIC_COMMAND}")
@@ -332,21 +349,31 @@ def on_connect(client, userdata, flags, rc):
 
 
 def on_message(client, userdata, msg):
+<<<<<<< HEAD
     payload_str = msg.payload.decode()
     print(f"Pesan masuk [{msg.topic}]: (encrypted, {len(msg.payload)} bytes)")
     try:
         # Dekripsi perintah yang diterima dari backend (AES-128-GCM)
         data = aes_utils.decrypt_json(payload_str)
         print(f"  -> Dekripsi OK: {data}")
+=======
+    payload = msg.payload.decode()
+    print(f"Pesan masuk [{msg.topic}]: {payload}")
+    try:
+        data = json.loads(payload)
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
         cmd = data.get("cmd")
         if cmd == "rekam": camera.request_start()
         elif cmd == "stop": camera.request_stop()
         elif cmd == "foto": camera.request_snapshot()
         else: print(f"-> Perintah tidak dikenal: {cmd}")
+<<<<<<< HEAD
     except (ValueError, KeyError) as e:
         # Dekripsi/autentikasi gagal — data mungkin dirusak atau key salah
         print(f"[SECURITY] Dekripsi/autentikasi gagal: {e}")
         print("  -> Pesan DITOLAK (tidak dieksekusi)")
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
     except json.JSONDecodeError:
         print("-> Pesan bukan JSON valid, diabaikan.")
 
@@ -355,9 +382,12 @@ client = mqtt.Client(client_id=DEVICE_ID)
 if USERNAME and PASSWORD:
     client.username_pw_set(USERNAME, PASSWORD)
     client.tls_set()
+<<<<<<< HEAD
 # Last Will tetap plaintext — MQTT broker mengirimnya saat device disconnect,
 # dan kita tidak bisa menggunakan nonce unik karena payload di-set sekali saat connect.
 # Backend menangani ini dengan fallback plaintext parse khusus untuk topic status.
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 client.will_set(TOPIC_STATUS, json.dumps({"status": "offline"}),
                 qos=1, retain=True)
 client.on_connect = on_connect
@@ -383,9 +413,13 @@ def main():
         print("\nMenutup...")
         camera.stop()
         time.sleep(1)
+<<<<<<< HEAD
         # Status offline terakhir dienkripsi (beda dengan Last Will yang plaintext)
         encrypted_offline = aes_utils.encrypt_json({"status": "offline"})
         client.publish(TOPIC_STATUS, encrypted_offline,
+=======
+        client.publish(TOPIC_STATUS, json.dumps({"status": "offline"}),
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
                        qos=1, retain=True)
         client.disconnect()
 

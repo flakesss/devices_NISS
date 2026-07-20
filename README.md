@@ -44,7 +44,10 @@ Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
 - **Ambil foto** JPEG via perintah MQTT
 - **Upload otomatis** ke Supabase Storage setelah rekam/foto selesai
 - **Publikasi event** ke broker MQTT (Mosquitto lokal) untuk notifikasi backend
+<<<<<<< HEAD
 - **Enkripsi AES-128-GCM** pada semua payload MQTT (command, event, status) — kerahasiaan + integritas data dalam satu operasi kriptografi
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 ## Prasyarat
 
@@ -53,12 +56,20 @@ Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
 python3 --version
 
 # Dependensi
+<<<<<<< HEAD
 pip3 install opencv-python-headless paho-mqtt flask requests python-dotenv pycryptodome
+=======
+pip3 install opencv-python-headless paho-mqtt flask requests python-dotenv
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 ```
 
 > **Catatan:** Gunakan `opencv-python-headless` (bukan `opencv-python`) di Raspberry Pi tanpa display.
 
+<<<<<<< HEAD
 ## Konfigurasi (`.env` Device Node / Pi)
+=======
+## Konfigurasi
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 Salin template dan isi dengan nilai yang sesuai:
 
@@ -66,7 +77,11 @@ Salin template dan isi dengan nilai yang sesuai:
 cp .env.example .env
 ```
 
+<<<<<<< HEAD
 Isi `.env` dengan konfigurasi berikut agar script `mqtt_server.py` dan layanan di Pi dapat berjalan:
+=======
+Isi `.env`:
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 ```env
 # Pi & broker satu LAN yang sama:
@@ -80,13 +95,17 @@ MQTT_USERNAME=
 MQTT_PASSWORD=
 DEVICE_ID=endoskop-01
 
+<<<<<<< HEAD
 # Konfigurasi Kamera & Live Stream
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 CAMERA_INDEX=0
 FRAME_WIDTH=1280
 FRAME_HEIGHT=720
 VIDEO_FPS=20
 JPEG_QUALITY=80
 MEDIA_DIR=/path/to/media
+<<<<<<< HEAD
 STREAM_PORT=5000
 
 # Konfigurasi Compressive Sensing (CS)
@@ -121,6 +140,14 @@ NISS_AES_KEY=
 | `SUPABASE_BUCKET` | `endoskop-media` | Nama bucket storage di Supabase |
 | `NISS_AES_KEY` | *(auto-generate)* | Key AES-128 hex (32 char). Jika kosong, baca dari `aes_key.bin`. Jika file belum ada, generate otomatis saat startup pertama |
 
+=======
+
+SUPABASE_URL=https://yourproject.supabase.co
+SUPABASE_KEY=your_service_role_key
+SUPABASE_BUCKET=endoskop-media
+```
+
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 > Resolusi aktual kamera terdeteksi otomatis saat startup. Cek log untuk melihat resolusi yang digunakan.
 >
 > `MQTT_USERNAME`/`MQTT_PASSWORD` dikosongkan karena broker Mosquitto lokal
@@ -160,6 +187,7 @@ docker compose ps
 docker logs niss-cloudflared
 ```
 
+<<<<<<< HEAD
 ### Konfigurasi `.env` (root repo untuk Docker Compose / Microservice)
 
 Jika menjalankan seluruh infrastruktur (Backend, Mosquitto, Cloudflare Tunnel, dan Microservice Faringitis) via `docker compose up`, pastikan file `.env` di root memuat:
@@ -180,6 +208,15 @@ API_TOKEN=
 | `MODEL_PATH` | `model_scripted.pt` | Path file model TorchScript untuk klasifikasi faringitis |
 | `IMG_SIZE` | `224` | Ukuran input citra ke model |
 | `API_TOKEN` | - | Token autentikasi opsional untuk WebSocket `/ws/predict` (kosongkan untuk tanpa auth) |
+=======
+### Konfigurasi `.env` (root repo)
+
+```env
+CLOUDFLARE_TOKEN=<token dari Cloudflare Zero Trust dashboard>
+```
+
+Token didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 ## Menjalankan Pi di Jaringan/Lokasi Berbeda
 
@@ -261,6 +298,7 @@ Setelah script berjalan:
 | Cloudflare tunnel tidak connect | Cek `docker logs niss-cloudflared` — pastikan `CLOUDFLARE_TOKEN` di `.env` sudah benar |
 | Pi beda jaringan tidak connect ke MQTT | Cek service `cloudflared-mqtt-proxy` di Pi (`systemctl status cloudflared-mqtt-proxy`), dan `docker logs niss-cloudflared-mqtt` di PC lab — lihat [`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md) |
 | Live stream Pi (beda jaringan) tidak muncul di web | Cek tunnel `niss-pi-stream` aktif di Pi (`systemctl status cloudflared`) dan `PI_STREAM_URL=https://pi-stream.satsetin.com/stream` di `.env` backend |
+<<<<<<< HEAD
 | `[SECURITY] Dekripsi/autentikasi gagal` | Key di device dan backend tidak sama. Pastikan `NISS_AES_KEY` di `.env` backend identik dengan key di Pi |
 
 ## Enkripsi AES-128-GCM
@@ -317,3 +355,5 @@ python3 measure_aes_endoscope.py
 # Test interoperabilitas, persistensi key, penolakan data rusak
 python3 test_aes_interop.py
 ```
+=======
+>>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6

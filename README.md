@@ -18,6 +18,8 @@ Browser / Frontend (Vercel)
   Docker Compose (PC Lab)
   ├── backend (Node.js :3000)
   ├── mosquitto (MQTT :1883)
+  ├── cs-reconstruct     (rekonstruksi Compressive Sensing, internal)
+  ├── pharyngitis-ws     (deteksi faringitis, internal)
   ├── cloudflared        → tunnel "NISS"        (expose backend)
   └── cloudflared-mqtt   → tunnel "niss-mqtt"   (expose mosquitto:1883)
         │                         ▲
@@ -36,6 +38,10 @@ Browser / Frontend (Vercel)
 Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
 [`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md).
 
+> **Perangkat Pi fisik perlu diperbarui secara manual** (git pull + restart) —
+> lihat **[`PI_UPDATE.md`](./PI_UPDATE.md)** untuk langkah lengkap menarik
+> fitur Compressive Sensing & enkripsi AES-128-GCM terbaru ke Pi.
+
 ## Fitur
 
 - **Live stream** MJPEG di `http://<ip-pi>:5000/stream`
@@ -44,10 +50,8 @@ Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
 - **Ambil foto** JPEG via perintah MQTT
 - **Upload otomatis** ke Supabase Storage setelah rekam/foto selesai
 - **Publikasi event** ke broker MQTT (Mosquitto lokal) untuk notifikasi backend
-<<<<<<< HEAD
-- **Enkripsi AES-128-GCM** pada semua payload MQTT (command, event, status) — kerahasiaan + integritas data dalam satu operasi kriptografi
-=======
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
+- **Compressive Sensing** opsional (`/snapshot_cs`, `/stream_cs`) — payload measurement (belum direkonstruksi) dikirim lebih kecil dari data mentah, direkonstruksi di service `cs-reconstruct`
+- **Enkripsi AES-128-GCM** pada semua payload MQTT (command, event, status) dan payload Compressive Sensing — kerahasiaan + integritas data dalam satu operasi kriptografi
 
 ## Prasyarat
 
@@ -56,20 +60,12 @@ Setup lengkap tunnel untuk deployment Pi di jaringan berbeda ada di
 python3 --version
 
 # Dependensi
-<<<<<<< HEAD
 pip3 install opencv-python-headless paho-mqtt flask requests python-dotenv pycryptodome
-=======
-pip3 install opencv-python-headless paho-mqtt flask requests python-dotenv
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 ```
 
 > **Catatan:** Gunakan `opencv-python-headless` (bukan `opencv-python`) di Raspberry Pi tanpa display.
 
-<<<<<<< HEAD
 ## Konfigurasi (`.env` Device Node / Pi)
-=======
-## Konfigurasi
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 Salin template dan isi dengan nilai yang sesuai:
 
@@ -77,11 +73,7 @@ Salin template dan isi dengan nilai yang sesuai:
 cp .env.example .env
 ```
 
-<<<<<<< HEAD
 Isi `.env` dengan konfigurasi berikut agar script `mqtt_server.py` dan layanan di Pi dapat berjalan:
-=======
-Isi `.env`:
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 
 ```env
 # Pi & broker satu LAN yang sama:
@@ -95,22 +87,18 @@ MQTT_USERNAME=
 MQTT_PASSWORD=
 DEVICE_ID=endoskop-01
 
-<<<<<<< HEAD
 # Konfigurasi Kamera & Live Stream
-=======
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 CAMERA_INDEX=0
 FRAME_WIDTH=1280
 FRAME_HEIGHT=720
 VIDEO_FPS=20
 JPEG_QUALITY=80
 MEDIA_DIR=/path/to/media
-<<<<<<< HEAD
 STREAM_PORT=5000
 
 # Konfigurasi Compressive Sensing (CS)
-CS_BLOCK_SIZE=8
-CS_MR_PERCENT=50
+CS_BLOCK_SIZE=64
+CS_MR_PERCENT=100
 
 # Konfigurasi Supabase Storage & Database
 SUPABASE_URL=https://yourproject.supabase.co
@@ -133,21 +121,13 @@ NISS_AES_KEY=
 | `JPEG_QUALITY` | `80` | Kualitas kompresi JPEG snapshot/stream (1-100) |
 | `MEDIA_DIR` | `./media` | Direktori lokal untuk menyimpan sementara file foto/video sebelum di-upload |
 | `STREAM_PORT` | `5000` | Port server Flask untuk live stream MJPEG & snapshot |
-| `CS_BLOCK_SIZE` | `8` | Ukuran blok piksel (NxN) untuk Compressive Sensing |
-| `CS_MR_PERCENT` | `50` | Persentase *measurement rate* Compressive Sensing |
+| `CS_BLOCK_SIZE` | `64` | Ukuran blok piksel (NxN) untuk Compressive Sensing |
+| `CS_MR_PERCENT` | `100` | Persentase *measurement rate* Compressive Sensing (100 = kualitas terbaik, penghematan dari kuantisasi int8+gzip) |
 | `SUPABASE_URL` | - | URL project Supabase |
 | `SUPABASE_KEY` | - | Kunci `service_role` Supabase untuk otorisasi upload |
 | `SUPABASE_BUCKET` | `endoskop-media` | Nama bucket storage di Supabase |
 | `NISS_AES_KEY` | *(auto-generate)* | Key AES-128 hex (32 char). Jika kosong, baca dari `aes_key.bin`. Jika file belum ada, generate otomatis saat startup pertama |
 
-=======
-
-SUPABASE_URL=https://yourproject.supabase.co
-SUPABASE_KEY=your_service_role_key
-SUPABASE_BUCKET=endoskop-media
-```
-
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
 > Resolusi aktual kamera terdeteksi otomatis saat startup. Cek log untuk melihat resolusi yang digunakan.
 >
 > `MQTT_USERNAME`/`MQTT_PASSWORD` dikosongkan karena broker Mosquitto lokal
@@ -187,7 +167,6 @@ docker compose ps
 docker logs niss-cloudflared
 ```
 
-<<<<<<< HEAD
 ### Konfigurasi `.env` (root repo untuk Docker Compose / Microservice)
 
 Jika menjalankan seluruh infrastruktur (Backend, Mosquitto, Cloudflare Tunnel, dan Microservice Faringitis) via `docker compose up`, pastikan file `.env` di root memuat:
@@ -208,15 +187,8 @@ API_TOKEN=
 | `MODEL_PATH` | `model_scripted.pt` | Path file model TorchScript untuk klasifikasi faringitis |
 | `IMG_SIZE` | `224` | Ukuran input citra ke model |
 | `API_TOKEN` | - | Token autentikasi opsional untuk WebSocket `/ws/predict` (kosongkan untuk tanpa auth) |
-=======
-### Konfigurasi `.env` (root repo)
 
-```env
-CLOUDFLARE_TOKEN=<token dari Cloudflare Zero Trust dashboard>
-```
-
-Token didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
+Token Cloudflare didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
 
 ## Menjalankan Pi di Jaringan/Lokasi Berbeda
 
@@ -284,6 +256,9 @@ Setelah script berjalan:
 |----------|------------|
 | `http://<ip-pi>:5000/stream` | MJPEG stream (pasang di `<img src>`) |
 | `http://<ip-pi>:5000/snapshot` | Satu frame JPEG |
+| `http://<ip-pi>:5000/snapshot_cs` | Satu frame Compressive Sensing (belum direkonstruksi, terenkripsi AES-128-GCM) |
+| `http://<ip-pi>:5000/stream_cs` | Stream multipart Compressive Sensing |
+| `http://<ip-pi>:5000/info` | Resolusi & FPS aktual kamera (JSON) |
 | `http://<ip-pi>:5000/health` | Health check |
 
 ## Troubleshooting
@@ -298,12 +273,12 @@ Setelah script berjalan:
 | Cloudflare tunnel tidak connect | Cek `docker logs niss-cloudflared` — pastikan `CLOUDFLARE_TOKEN` di `.env` sudah benar |
 | Pi beda jaringan tidak connect ke MQTT | Cek service `cloudflared-mqtt-proxy` di Pi (`systemctl status cloudflared-mqtt-proxy`), dan `docker logs niss-cloudflared-mqtt` di PC lab — lihat [`pi-tunnel-setup/README.md`](./pi-tunnel-setup/README.md) |
 | Live stream Pi (beda jaringan) tidak muncul di web | Cek tunnel `niss-pi-stream` aktif di Pi (`systemctl status cloudflared`) dan `PI_STREAM_URL=https://pi-stream.satsetin.com/stream` di `.env` backend |
-<<<<<<< HEAD
 | `[SECURITY] Dekripsi/autentikasi gagal` | Key di device dan backend tidak sama. Pastikan `NISS_AES_KEY` di `.env` backend identik dengan key di Pi |
+| `/stream/snapshot/cs` mengembalikan 503/502 di frontend | Pi belum diperbarui ke kode CS terbaru, atau `NISS_AES_KEY` belum sama antara Pi & backend — lihat [`PI_UPDATE.md`](./PI_UPDATE.md) |
 
 ## Enkripsi AES-128-GCM
 
-Semua payload MQTT (command, event, status) dienkripsi menggunakan **AES-128-GCM** sebelum dikirim, menjamin:
+Semua payload MQTT (command, event, status) **dan payload Compressive Sensing** dienkripsi menggunakan **AES-128-GCM** sebelum dikirim, menjamin:
 - **Kerahasiaan** (confidentiality) — data tidak bisa dibaca pihak ketiga
 - **Integritas + Autentikasi** (integrity/authentication) — GCM auth tag mendeteksi manipulasi data yang disengaja (lebih kuat dari CRC32 yang hanya mendeteksi kerusakan acak)
 
@@ -316,7 +291,8 @@ Semua payload MQTT (command, event, status) dienkripsi menggunakan **AES-128-GCM
 | Nonce | 12 byte (96 bit), random per operasi, sesuai NIST SP 800-38D |
 | Auth Tag | 16 byte (128 bit) |
 | Library | pycryptodome (`pip3 install pycryptodome`) |
-| Overhead per paket | 28 byte (nonce 12 + tag 16) |
+| Overhead per paket (MQTT, format JSON/base64) | 28 byte + ~33% base64 |
+| Overhead per paket (payload CS, format biner mentah) | 28 byte saja (nonce 12 + tag 16), tanpa base64 |
 
 ### Kenapa AES-128, bukan AES-256?
 
@@ -333,7 +309,7 @@ Pengujian menunjukkan selisih performa antara AES-128 dan AES-256 di ukuran data
 2. **Salin hex key** ke `.env` backend: `NISS_AES_KEY=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6`
 3. Atau baca hex key dari file: `python3 -c "print(open('aes_key.bin','rb').read().hex())"`
 
-> **PENTING:** Key HARUS identik di device (Pi) dan backend. Jika berbeda, semua pesan MQTT akan gagal didekripsi.
+> **PENTING:** Key HARUS identik di device (Pi) dan backend. Jika berbeda, semua pesan MQTT dan payload CS akan gagal didekripsi.
 >
 > File `aes_key.bin` dan `.env` sudah ditambahkan ke `.gitignore` — JANGAN commit key ke git.
 
@@ -355,5 +331,26 @@ python3 measure_aes_endoscope.py
 # Test interoperabilitas, persistensi key, penolakan data rusak
 python3 test_aes_interop.py
 ```
-=======
->>>>>>> dec8b9da5af95d891e1185203720ae0f9ebb5ae6
+
+## Compressive Sensing (CS)
+
+Payload measurement CS (belum direkonstruksi) dikirim dari Pi lewat `/snapshot_cs`
+dan `/stream_cs`, direkonstruksi di service `cs-reconstruct` (Docker Compose, PC
+lab) via OMP+DCT, lalu dikembalikan sebagai JPEG ke frontend. Fitur ini **opsional**
+(toggle "Mode: Compressive Sensing" di frontend) — endpoint JPEG normal (`/stream`,
+`/snapshot`) tetap default dan tidak terpengaruh.
+
+Detail implementasi & hasil pengujian (payload vs data mentah, PSNR, SSIM) ada di
+`cs_codec.py` (docstring & komentar inline). Ringkasan konfigurasi default:
+
+| Parameter | Default | Keterangan |
+|---|---|---|
+| Basis sparse | DCT | Ditentukan lewat eksperimen (NMSE rata-rata terendah) |
+| Sensing matrix | Bernoulli ±1/√M | Seed tetap (`CS_SEED=42`), deterministik di kedua sisi |
+| Rekonstruksi | OMP (`K = 0.25×M`) | |
+| Channel yang diproses | Y (luminance) saja, format YCbCr | Cb/Cr dikirim lewat downsample 4× + JPEG ringan — warna hasil akhir tetap warna **asli**, bukan tebakan/colorization AI |
+| `CS_MR_PERCENT` | 100% | Measurement rate — penghematan ukuran murni dari kuantisasi int8+gzip, bukan dari mengurangi sampel (kualitas terbaik yang diuji) |
+
+Hasil pengujian pada foto endoskop 1280×720 (MR=100%): payload **320 KB**
+(terenkripsi 320.7 KB), **8.6× lebih kecil dari data mentah** (2.76 MB), PSNR
+31.5 dB, SSIM 0.82.

@@ -31,7 +31,11 @@ def reconstruct():
     bytes_in = len(payload)
     t0 = time.time()
     try:
-        frame = cs_codec.reconstruct_frame(payload)
+        magic = payload[:4]
+        if magic == cs_codec._MAGIC_YCC:
+            frame = cs_codec.reconstruct_frame_ycbcr(payload)
+        else:
+            frame = cs_codec.reconstruct_frame(payload)
     except Exception as e:
         return Response(f"rekonstruksi gagal: {e}", status=400)
     elapsed_ms = round((time.time() - t0) * 1000, 1)

@@ -16,6 +16,7 @@ butuh scipy/scikit-learn juga -- lihat requirements.txt masing-masing service.
 import gzip
 import struct
 
+import cv2
 import numpy as np
 
 CS_SEED = 42
@@ -35,6 +36,19 @@ CS_QUANT_SCALE = 50
 _MAGIC = b"NCS1"
 _HEADER_FMT = ">4sHHHHHHB"   # magic, N, M, block_rows, block_cols, orig_w, orig_h, channels
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+
+# ── Varian YCbCr: CS cuma di channel Y (luminance), Cb/Cr dikirim ringan ──
+# lewat subsampling + JPEG -- warna hasil akhir tetap warna ASLI (bukan
+# tebakan/colorization AI), cuma resolusi warnanya diturunkan -- sama
+# prinsipnya dengan subsampling chroma 4:2:0 di JPEG biasa, karena mata
+# manusia jauh kurang sensitif ke detail warna dibanding detail kecerahan.
+CS_CHROMA_SCALE = 4          # turunkan resolusi Cb/Cr N kali (lebar & tinggi)
+CS_CHROMA_JPEG_QUALITY = 80
+
+_MAGIC_YCC = b"NCS2"
+# magic, N, M, block_rows, block_cols, orig_w, orig_h, chroma_scale, cb_len, cr_len
+_HEADER_YCC_FMT = ">4sHHHHHHBII"
+_HEADER_YCC_SIZE = struct.calcsize(_HEADER_YCC_FMT)
 
 
 # ───────────────────────── Encode-side (Pi, numpy only) ─────────────────────
@@ -171,3 +185,81 @@ def reconstruct_frame(payload, seed=CS_SEED):
 
     frame = np.stack(out_channels, axis=-1) if channels > 1 else out_channels[0]
     return np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+
+
+# ───────────── Varian YCbCr: CS di Y saja, warna asli lewat Cb/Cr ringan ─────
+
+def _encode_y_channel(y_plane, N, mr_percent, seed):
+    """y_plane: 2D uint8 (H x W). Return (compressed_bytes, M, rows, cols)."""
+    M = max(1, int(round(mr_percent / 100 * N)))
+    Phi = sensing_matrix(M, N, seed)
+    padded = _pad_to_multiple(y_plane, N)
+    blocks, rows, cols = split_blocks(padded.astype(np.float32) / 255.0, N)
+
+    all_Y = [Phi @ blk for blk in blocks]
+    stacked = np.stack(all_Y, axis=0)
+    quantized = np.clip(np.round(stacked * CS_QUANT_SCALE), -127, 127).astype(np.int8)
+    compressed = gzip.compress(quantized.tobytes(), compresslevel=6)
+    return compressed, M, rows, cols
+
+
+def encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT,
+                        seed=CS_SEED, chroma_scale=CS_CHROMA_SCALE):
+    """frame_rgb: HxWx3 uint8. CS diterapkan cuma di channel Y (luminance);
+    Cb/Cr dikirim lewat subsampling + JPEG (warna asli, bukan colorization)."""
+    assert (N & (N - 1)) == 0, "CS_BLOCK_SIZE harus pangkat dua"
+    orig_h, orig_w = frame_rgb.shape[:2]
+
+    ycc = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2YCrCb)
+    y_plane, cr_plane, cb_plane = ycc[:, :, 0], ycc[:, :, 1], ycc[:, :, 2]
+
+    y_compressed, M, rows, cols = _encode_y_channel(y_plane, N, mr_percent, seed)
+
+    small_w = max(1, orig_w // chroma_scale)
+    small_h = max(1, orig_h // chroma_scale)
+    cb_small = cv2.resize(cb_plane, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    cr_small = cv2.resize(cr_plane, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    ok_cb, cb_jpeg = cv2.imencode(".jpg", cb_small, [cv2.IMWRITE_JPEG_QUALITY, CS_CHROMA_JPEG_QUALITY])
+    ok_cr, cr_jpeg = cv2.imencode(".jpg", cr_small, [cv2.IMWRITE_JPEG_QUALITY, CS_CHROMA_JPEG_QUALITY])
+    if not (ok_cb and ok_cr):
+        raise ValueError("Gagal encode JPEG untuk channel Cb/Cr")
+    cb_bytes, cr_bytes = cb_jpeg.tobytes(), cr_jpeg.tobytes()
+
+    header = struct.pack(_HEADER_YCC_FMT, _MAGIC_YCC, N, M, rows, cols,
+                          orig_w, orig_h, chroma_scale, len(cb_bytes), len(cr_bytes))
+    return header + cb_bytes + cr_bytes + y_compressed
+
+
+def reconstruct_frame_ycbcr(payload, seed=CS_SEED):
+    """Decode payload YCbCr -> citra RGB uint8 (HxWx3), warna asli dipertahankan."""
+    header = payload[:_HEADER_YCC_SIZE]
+    magic, N, M, rows, cols, orig_w, orig_h, chroma_scale, cb_len, cr_len = struct.unpack(
+        _HEADER_YCC_FMT, header)
+    if magic != _MAGIC_YCC:
+        raise ValueError("Payload CS YCbCr tidak valid (magic mismatch)")
+
+    offset = _HEADER_YCC_SIZE
+    cb_bytes = payload[offset:offset + cb_len]; offset += cb_len
+    cr_bytes = payload[offset:offset + cr_len]; offset += cr_len
+    y_compressed = payload[offset:]
+
+    # ── rekonstruksi Y lewat OMP+DCT (sama seperti sebelumnya) ──
+    raw = gzip.decompress(y_compressed)
+    quantized = np.frombuffer(raw, dtype=np.int8).reshape(rows * cols, M, N)
+    stacked = quantized.astype(np.float32) / CS_QUANT_SCALE
+
+    Phi = sensing_matrix(M, N, seed)
+    W = build_dct_matrix(N)
+    K = K_for(M)
+    blocks = [reconstruct(stacked[i], Phi, W, K) for i in range(rows * cols)]
+    y_plane = merge_blocks(blocks, rows, cols, N, orig_h, orig_w)
+    y_plane = np.clip(y_plane * 255.0, 0, 255).astype(np.uint8)
+
+    # ── Cb/Cr: decode JPEG lalu upsample ke ukuran asli (warna asli, bukan tebakan) ──
+    cb_small = cv2.imdecode(np.frombuffer(cb_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    cr_small = cv2.imdecode(np.frombuffer(cr_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    cb_plane = cv2.resize(cb_small, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+    cr_plane = cv2.resize(cr_small, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+
+    ycc = np.stack([y_plane, cr_plane, cb_plane], axis=-1)
+    return cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB)

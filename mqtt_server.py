@@ -149,7 +149,7 @@ class CameraController:
             # payload Compressive Sensing (measurement belum direkonstruksi) —
             # dikirim lewat /snapshot_cs & /stream_cs, opsional/paralel dengan JPEG
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            cs_payload = cs_codec.encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
+            cs_payload = cs_codec.encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
             with self._frame_lock:
                 self.latest_cs_payload = cs_payload
 

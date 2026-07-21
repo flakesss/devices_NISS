@@ -2,9 +2,10 @@
 Endoskop Node — MQTT control + Live Stream + Upload Supabase
 - Live stream MJPEG di http://<ip-pi>:5000/stream  (pasang di <img src="...">)
 - Perintah MQTT: rekam / stop / foto
-- File hasil di-upload ke Supabase Storage
+- File hasil di-upload ke Supabase Storage (terenkripsi AES-128-GCM)
+- Payload MQTT dienkripsi dengan AES-128-GCM (kerahasiaan + integritas)
 
-Jalankan: python3 endoskop_node.py
+Jalankan: python3 mqtt_server.py
 """
 
 import os
@@ -22,6 +23,7 @@ import paho.mqtt.client as mqtt
 from flask import Flask, Response
 
 import cs_codec
+import aes_utils
 
 # ====== KONFIGURASI BROKER MQTT ======
 BROKER_HOST = os.environ["MQTT_HOST"]
@@ -45,6 +47,12 @@ CS_MR_PERCENT = int(os.getenv("CS_MR_PERCENT", str(cs_codec.CS_MR_PERCENT)))
 # ====== KONFIGURASI STREAM ======
 STREAM_PORT = int(os.getenv("STREAM_PORT", "5000"))
 
+# ====== INISIALISASI AES-128-GCM ======
+# Key dimuat sekali saat startup — persisten dari env var atau aes_key.bin.
+# Raspberry Pi 4 (BCM2711) tidak punya hardware AES accelerator;
+# semua operasi AES berjalan software-only (tetap <1ms untuk data kecil).
+aes_utils.load_key()
+
 # ====== KONFIGURASI SUPABASE ======
 SUPABASE_URL    = os.environ["SUPABASE_URL"]
 SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
@@ -56,21 +64,36 @@ TOPIC_EVENT   = f"endoskop/{DEVICE_ID}/event"
 
 
 def upload_to_supabase(local_path):
+    """Upload file ke Supabase Storage — dienkripsi AES-128-GCM sebelum upload.
+
+    File disimpan di Supabase sebagai JSON terenkripsi dengan suffix .enc.
+    Backend akan mendekripsinya secara transparan saat diminta oleh frontend.
+    Ini menghasilkan arsitektur Zero-Knowledge Storage: Supabase hanya
+    menyimpan ciphertext, data medis pasien tidak pernah terekspos di cloud.
+    """
     filename = os.path.basename(local_path)
-    storage_path = f"{DEVICE_ID}/{filename}"
+    # Tambahkan suffix .enc pada storage path — menandakan file terenkripsi
+    storage_path = f"{DEVICE_ID}/{filename}.enc"
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{storage_path}"
     try:
         with open(local_path, "rb") as f:
-            data = f.read()
+            raw_data = f.read()
+
+        # Enkripsi file dengan AES-128-GCM sebelum upload
+        enc_packet = aes_utils.encrypt_bytes(raw_data)
+        enc_payload = json.dumps(enc_packet, separators=(",", ":")).encode("utf-8")
+
+        print(f"-> Enkripsi file: {len(raw_data)} bytes -> {len(enc_payload)} bytes (AES-128-GCM)")
+
         headers = {
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "apikey": SUPABASE_KEY,
             "Content-Type": "application/octet-stream",
             "x-upsert": "true",
         }
-        r = requests.post(url, headers=headers, data=data, timeout=30)
+        r = requests.post(url, headers=headers, data=enc_payload, timeout=60)
         if r.status_code in (200, 201):
-            print(f"-> Upload sukses: {storage_path}")
+            print(f"-> Upload sukses (encrypted): {storage_path}")
             return storage_path
         print(f"-> Upload GAGAL ({r.status_code}): {r.text}")
         return None
@@ -305,13 +328,17 @@ def run_stream_server():
 
 # ====== MQTT ======
 def publish_event(payload):
-    client.publish(TOPIC_EVENT, json.dumps(payload), qos=1)
+    # Enkripsi event sebelum publish — GCM auth tag menjamin integritas
+    encrypted = aes_utils.encrypt_json(payload)
+    client.publish(TOPIC_EVENT, encrypted, qos=1)
 
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Terhubung ke broker MQTT!")
-        client.publish(TOPIC_STATUS, json.dumps({"status": "online"}),
+        # Enkripsi status online — backend akan mendekripsinya
+        encrypted_status = aes_utils.encrypt_json({"status": "online"})
+        client.publish(TOPIC_STATUS, encrypted_status,
                        qos=1, retain=True)
         client.subscribe(TOPIC_COMMAND, qos=1)
         print(f"Mendengarkan perintah di: {TOPIC_COMMAND}")
@@ -320,15 +347,21 @@ def on_connect(client, userdata, flags, rc):
 
 
 def on_message(client, userdata, msg):
-    payload = msg.payload.decode()
-    print(f"Pesan masuk [{msg.topic}]: {payload}")
+    payload_str = msg.payload.decode()
+    print(f"Pesan masuk [{msg.topic}]: (encrypted, {len(msg.payload)} bytes)")
     try:
-        data = json.loads(payload)
+        # Dekripsi perintah yang diterima dari backend (AES-128-GCM)
+        data = aes_utils.decrypt_json(payload_str)
+        print(f"  -> Dekripsi OK: {data}")
         cmd = data.get("cmd")
         if cmd == "rekam": camera.request_start()
         elif cmd == "stop": camera.request_stop()
         elif cmd == "foto": camera.request_snapshot()
         else: print(f"-> Perintah tidak dikenal: {cmd}")
+    except (ValueError, KeyError) as e:
+        # Dekripsi/autentikasi gagal — data mungkin dirusak atau key salah
+        print(f"[SECURITY] Dekripsi/autentikasi gagal: {e}")
+        print("  -> Pesan DITOLAK (tidak dieksekusi)")
     except json.JSONDecodeError:
         print("-> Pesan bukan JSON valid, diabaikan.")
 
@@ -337,6 +370,9 @@ client = mqtt.Client(client_id=DEVICE_ID)
 if USERNAME and PASSWORD:
     client.username_pw_set(USERNAME, PASSWORD)
     client.tls_set()
+# Last Will tetap plaintext — MQTT broker mengirimnya saat device disconnect,
+# dan kita tidak bisa menggunakan nonce unik karena payload di-set sekali saat connect.
+# Backend menangani ini dengan fallback plaintext parse khusus untuk topic status.
 client.will_set(TOPIC_STATUS, json.dumps({"status": "offline"}),
                 qos=1, retain=True)
 client.on_connect = on_connect
@@ -362,7 +398,9 @@ def main():
         print("\nMenutup...")
         camera.stop()
         time.sleep(1)
-        client.publish(TOPIC_STATUS, json.dumps({"status": "offline"}),
+        # Status offline terakhir dienkripsi (beda dengan Last Will yang plaintext)
+        encrypted_offline = aes_utils.encrypt_json({"status": "offline"})
+        client.publish(TOPIC_STATUS, encrypted_offline,
                        qos=1, retain=True)
         client.disconnect()
 

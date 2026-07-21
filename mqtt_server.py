@@ -170,11 +170,15 @@ class CameraController:
                     self.latest_jpeg = buf.tobytes()
 
             # payload Compressive Sensing (measurement belum direkonstruksi) —
-            # dikirim lewat /snapshot_cs & /stream_cs, opsional/paralel dengan JPEG
+            # dikirim lewat /snapshot_cs & /stream_cs, opsional/paralel dengan JPEG.
+            # Dienkripsi AES-128-GCM (format biner mentah, bukan JSON/base64,
+            # supaya tidak menambah overhead di atas payload yang sudah
+            # diperkecil habis-habisan) -- konsisten dengan file upload & MQTT.
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             cs_payload = cs_codec.encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
+            cs_payload_enc = aes_utils.encrypt_bytes_raw(cs_payload)
             with self._frame_lock:
-                self.latest_cs_payload = cs_payload
+                self.latest_cs_payload = cs_payload_enc
 
             # baca flag perintah
             with self._lock:

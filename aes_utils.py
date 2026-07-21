@@ -197,6 +197,45 @@ def decrypt_bytes(packet, key=None):
     return plaintext
 
 
+# ── Helper biner mentah (tanpa JSON/base64) -- dipakai untuk payload besar
+# seperti Compressive Sensing, supaya tidak menambah overhead ~33% base64 di
+# atas payload yang memang sudah diperkecil habis-habisan. Format:
+# nonce(12 byte) + tag(16 byte) + ciphertext.
+
+def encrypt_bytes_raw(plaintext, key=None):
+    """Sama seperti encrypt_bytes tapi return bytes mentah (bukan dict base64)."""
+    if key is None:
+        key = load_key()
+    if not isinstance(plaintext, bytes):
+        raise TypeError(f"plaintext harus bytes, diterima {type(plaintext).__name__}")
+
+    nonce = os.urandom(_NONCE_LENGTH)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+    return nonce + tag + ciphertext
+
+
+def decrypt_bytes_raw(packet, key=None):
+    """Dekripsi bytes mentah dari encrypt_bytes_raw (nonce+tag+ciphertext)."""
+    if key is None:
+        key = load_key()
+    if len(packet) < _NONCE_LENGTH + 16:
+        raise ValueError("Payload terenkripsi terlalu pendek (rusak/salah format)")
+
+    nonce = packet[:_NONCE_LENGTH]
+    tag = packet[_NONCE_LENGTH:_NONCE_LENGTH + 16]
+    ciphertext = packet[_NONCE_LENGTH + 16:]
+
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    try:
+        return cipher.decrypt_and_verify(ciphertext, tag)
+    except (ValueError, KeyError) as e:
+        raise ValueError(
+            f"Dekripsi AES-128-GCM gagal — data mungkin dirusak, "
+            f"tag tidak cocok, atau key salah. Detail: {e}"
+        ) from e
+
+
 # ── Helper untuk payload JSON (kasus umum: dict ↔ encrypted JSON string) ────
 
 def encrypt_json(data):

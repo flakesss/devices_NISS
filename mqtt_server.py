@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import cv2
+import numpy as np
 import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, Response
@@ -220,8 +221,25 @@ class CameraController:
             recon_rgb = cs_codec.reconstruct_frame_ycbcr(cs_payload)
             save_frame = cv2.cvtColor(recon_rgb, cv2.COLOR_RGB2BGR)
             elapsed_s = round(time.time() - t0, 1)
-            cs_info = {"mrPercent": mr_percent, "csPayloadBytes": len(cs_payload), "reconstructSec": elapsed_s}
-            print(f"-> Foto via CS (MR {mr_percent}%): rekonstruksi {elapsed_s}s, payload {len(cs_payload)}B")
+
+            # Hitung PSNR/SSIM ASLI sekarang juga, selagi frame sebelum kompresi
+            # (frame_rgb) masih ada di memori -- setelah fungsi ini selesai, frame
+            # asli dibuang (itulah intinya CS: hemat bandwidth di sisi pengirim),
+            # jadi ini satu-satunya kesempatan untuk membandingkan ke ground truth.
+            from skimage.metrics import structural_similarity as ssim
+
+            orig_f = frame_rgb.astype(np.float32) / 255.0
+            recon_f = recon_rgb.astype(np.float32) / 255.0
+            mse = float(np.mean((orig_f - recon_f) ** 2))
+            psnr = 10 * np.log10(1.0 / mse) if mse > 0 else 99.0
+            ssim_val = float(ssim(orig_f, recon_f, channel_axis=2, data_range=1.0))
+
+            cs_info = {
+                "mrPercent": mr_percent, "csPayloadBytes": len(cs_payload), "reconstructSec": elapsed_s,
+                "psnr": round(psnr, 2), "ssim": round(ssim_val, 4),
+            }
+            print(f"-> Foto via CS (MR {mr_percent}%): rekonstruksi {elapsed_s}s, payload {len(cs_payload)}B, "
+                  f"PSNR {cs_info['psnr']}dB, SSIM {cs_info['ssim']}")
 
         cv2.imwrite(path, save_frame)
         print(f"-> Foto disimpan: {path}")

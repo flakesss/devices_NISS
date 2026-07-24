@@ -81,8 +81,13 @@ Ini butuh dependency tambahan (sebelumnya cuma dipakai oleh service
 `cs-reconstruct` di PC, sekarang juga dipakai langsung di Pi):
 
 ```bash
-pip3 install scipy scikit-learn
+pip3 install scipy scikit-learn scikit-image
 ```
+
+(`scikit-image` dipakai untuk menghitung PSNR/SSIM **asli** — dibandingkan
+terhadap frame sebelum kompresi, dihitung sesaat sebelum frame itu dibuang —
+supaya panel "Info Kompresi" bisa menampilkan angka kualitas nyata untuk
+foto yang diambil lewat toggle ini, bukan cuma MR & ukuran payload.)
 
 **Catatan performa:** OMP (Orthogonal Matching Pursuit) cukup berat untuk
 CPU Raspberry Pi — rekonstruksi 1 foto bisa makan waktu beberapa detik

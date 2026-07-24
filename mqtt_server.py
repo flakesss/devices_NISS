@@ -131,14 +131,17 @@ class CameraController:
         self._start_req = False
         self._stop_req = False
         self._snap_req = False
+        self._snap_mr = None   # MR (%) jika foto diminta lewat CS; None = JPEG langsung (perilaku lama)
         self._lock = threading.Lock()
 
     def request_start(self):
         with self._lock: self._start_req = True
     def request_stop(self):
         with self._lock: self._stop_req = True
-    def request_snapshot(self):
-        with self._lock: self._snap_req = True
+    def request_snapshot(self, mr_percent=None):
+        with self._lock:
+            self._snap_req = True
+            self._snap_mr = mr_percent
 
     def get_latest_jpeg(self):
         with self._frame_lock:
@@ -185,9 +188,11 @@ class CameraController:
                 start_req = self._start_req
                 stop_req = self._stop_req
                 snap_req = self._snap_req
+                snap_mr = self._snap_mr
                 self._start_req = self._stop_req = self._snap_req = False
+                self._snap_mr = None
 
-            if snap_req: self._do_snapshot(frame)
+            if snap_req: self._do_snapshot(frame, mr_percent=snap_mr)
             if start_req: self._do_start()
             if stop_req: self._do_stop()
 
@@ -199,17 +204,35 @@ class CameraController:
         self.cap.release()
         print("Kamera dilepas.")
 
-    def _do_snapshot(self, frame):
+    def _do_snapshot(self, frame, mr_percent=None):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(MEDIA_DIR, f"foto_{ts}.jpg")
-        cv2.imwrite(path, frame)
+
+        save_frame = frame
+        cs_info = None
+        if mr_percent is not None:
+            # "Foto via CS": simpan hasil REKONSTRUKSI CS (bukan JPEG mentah kamera),
+            # supaya foto yang tampil di galeri benar-benar merefleksikan kualitas CS
+            # di MR yang dipilih user sebelum menekan tombol Foto.
+            t0 = time.time()
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cs_payload = cs_codec.encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=mr_percent)
+            recon_rgb = cs_codec.reconstruct_frame_ycbcr(cs_payload)
+            save_frame = cv2.cvtColor(recon_rgb, cv2.COLOR_RGB2BGR)
+            elapsed_s = round(time.time() - t0, 1)
+            cs_info = {"mrPercent": mr_percent, "csPayloadBytes": len(cs_payload), "reconstructSec": elapsed_s}
+            print(f"-> Foto via CS (MR {mr_percent}%): rekonstruksi {elapsed_s}s, payload {len(cs_payload)}B")
+
+        cv2.imwrite(path, save_frame)
         print(f"-> Foto disimpan: {path}")
         storage_path = upload_to_supabase(path)
-        self.publish_event({
+        event = {
             "event": "snapshot_taken",
             "file": path,
             "storage_path": storage_path,
-        })
+        }
+        if cs_info: event["cs"] = cs_info
+        self.publish_event(event)
 
     def _do_start(self):
         if self.recording:
@@ -361,7 +384,9 @@ def on_message(client, userdata, msg):
         cmd = data.get("cmd")
         if cmd == "rekam": camera.request_start()
         elif cmd == "stop": camera.request_stop()
-        elif cmd == "foto": camera.request_snapshot()
+        elif cmd == "foto":
+            mr = data.get("mr")
+            camera.request_snapshot(mr_percent=int(mr) if mr is not None else None)
         elif cmd == "set_cs_mr":
             global CS_MR_PERCENT
             mr = int(data.get("mr", CS_MR_PERCENT))

@@ -69,6 +69,34 @@ python3 -c "open('aes_key.bin','wb').write(bytes.fromhex('<HEX_KEY_DARI_BACKEND>
 > muncul log `[SECURITY] Dekripsi/autentikasi gagal` di backend, dan device
 > akan terlihat offline/rusak di frontend walau Pi-nya menyala normal.
 
+## 3b. (Opsional) Fitur "Foto via CS" — foto tersimpan = hasil rekonstruksi CS
+
+Fitur baru: toggle "Foto via CS" di frontend, kalau diaktifkan sebelum
+menekan tombol Foto, hasil foto yang disimpan & diupload adalah **hasil
+rekonstruksi OMP+DCT** di MR yang dipilih (bukan JPEG mentah kamera) —
+supaya efek Compressive Sensing benar-benar terlihat pada foto asli, bukan
+cuma simulasi di panel "Info Kompresi".
+
+Ini butuh dependency tambahan (sebelumnya cuma dipakai oleh service
+`cs-reconstruct` di PC, sekarang juga dipakai langsung di Pi):
+
+```bash
+pip3 install scipy scikit-learn
+```
+
+**Catatan performa:** OMP (Orthogonal Matching Pursuit) cukup berat untuk
+CPU Raspberry Pi — rekonstruksi 1 foto bisa makan waktu beberapa detik
+sampai puluhan detik tergantung resolusi & MR (jauh lebih lambat dari PC
+lab). Ini hanya dipakai untuk **foto** (aksi sekali klik), bukan video —
+menerapkannya ke rekaman video real-time tidak memungkinkan karena OMP
+tidak cukup cepat untuk diproses per-frame pada frame rate video.
+
+Kalau toggle "Foto via CS" **tidak pernah** diaktifkan, foto tetap tersimpan
+seperti biasa (JPEG langsung dari kamera) dan `scipy`/`scikit-learn` tidak
+akan pernah diimpor (lazy import, hanya dipanggil saat rekonstruksi
+benar-benar dijalankan) — tapi tetap disarankan diinstal dari awal supaya
+toggle langsung siap dipakai kapan saja tanpa error `ModuleNotFoundError`.
+
 ## 4. (Opsional) Sesuaikan parameter Compressive Sensing
 
 Default sudah aman dipakai apa adanya (`CS_BLOCK_SIZE=64`,

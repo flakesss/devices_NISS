@@ -14,7 +14,10 @@ butuh scipy/scikit-learn juga -- lihat requirements.txt masing-masing service.
 """
 
 import gzip
+import multiprocessing
+import os
 import struct
+from concurrent.futures import ProcessPoolExecutor
 
 import cv2
 import numpy as np
@@ -101,15 +104,16 @@ def encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT, seed=CS_S
     if padded.ndim == 2:
         padded = padded[:, :, None]
 
-    all_Y = []
+    per_channel_Y = []
     rows = cols = None
     for ch in range(channels):
         blocks, rows, cols = split_blocks(padded[:, :, ch].astype(np.float32) / 255.0, N)
-        for blk in blocks:
-            Y = Phi @ blk  # M x N
-            all_Y.append(Y)
+        blocks_arr = np.stack(blocks, axis=0)  # (n_blocks, N, N)
+        # Satu matmul batched (bukan loop Python per-blok) -- OpenBLAS bisa
+        # memparalelkan operasi ini lintas core, bukan cuma 1 thread.
+        per_channel_Y.append(Phi @ blocks_arr)  # (n_blocks, M, N)
 
-    stacked = np.stack(all_Y, axis=0)  # (channels*rows*cols, M, N)
+    stacked = np.concatenate(per_channel_Y, axis=0)  # (channels*rows*cols, M, N)
     # Kuantisasi float -> int8 (separuh ukuran int16, lihat CS_QUANT_SCALE di atas)
     quantized = np.clip(np.round(stacked * CS_QUANT_SCALE), -127, 127).astype(np.int8)
     raw = quantized.tobytes()
@@ -133,19 +137,53 @@ def K_for(M):
     return min(max(4, int(np.floor(K_RATIO * M))), M - 1)
 
 
+_executor = None
+
+
+def _get_executor():
+    """Pool proses persisten (bukan thread) untuk rekonstruksi OMP per-blok --
+    OMP di sklearn tidak melepas GIL sepenuhnya, jadi cuma multiprocessing yang
+    benar-benar memanfaatkan semua core CPU. Pakai spawn (bukan fork) supaya
+    tidak mewarisi state proses induk (kamera/koneksi MQTT yang sedang terbuka)."""
+    global _executor
+    if _executor is None:
+        ctx = multiprocessing.get_context("spawn")
+        _executor = ProcessPoolExecutor(max_workers=os.cpu_count(), mp_context=ctx)
+    return _executor
+
+
+def _reconstruct_blocks_parallel(Y_blocks, Phi, W, K):
+    """Y_blocks: list of (M,N) arrays. Rekonstruksi tiap blok di proses terpisah,
+    tersebar ke semua core CPU yang tersedia. chunksize besar (bukan default 1)
+    supaya tiap worker terima banyak blok sekaligus per round-trip IPC, bukan
+    kirim satu-satu (240 round-trip terpisah bikin overhead lebih dominan
+    daripada komputasinya sendiri)."""
+    n = len(Y_blocks)
+    ex = _get_executor()
+    workers = os.cpu_count() or 1
+    chunksize = max(1, -(-n // (workers * 2)))  # ceil(n / (workers*2))
+    return list(ex.map(reconstruct, Y_blocks, [Phi] * n, [W] * n, [K] * n, chunksize=chunksize))
+
+
 def reconstruct(Y, Phi, W, K):
     """Sama persis dengan notebook -- OMP di domain basis W, per kolom Y."""
     from sklearn.linear_model import OrthogonalMatchingPursuit
+    from threadpoolctl import threadpool_limits
 
-    A = Phi @ W.T
-    Yw = Y @ W.T
-    col_norms = np.linalg.norm(A, axis=0)
-    col_norms[col_norms < 1e-12] = 1.0
-    A_norm = A / col_norms
-    omp = OrthogonalMatchingPursuit(n_nonzero_coefs=int(K), fit_intercept=False)
-    omp.fit(A_norm, Yw)
-    S = (omp.coef_ / col_norms).T
-    return np.clip(np.real(W.T @ S @ W), 0, 1)
+    # Tiap panggilan ini jalan di proses worker terpisah (lihat
+    # _reconstruct_blocks_parallel) -- kalau BLAS di dalamnya tetap
+    # multi-thread, N proses x M thread BLAS akan rebutan core yang sama
+    # (oversubscription) dan malah lebih lambat daripada jalan serial.
+    with threadpool_limits(limits=1):
+        A = Phi @ W.T
+        Yw = Y @ W.T
+        col_norms = np.linalg.norm(A, axis=0)
+        col_norms[col_norms < 1e-12] = 1.0
+        A_norm = A / col_norms
+        omp = OrthogonalMatchingPursuit(n_nonzero_coefs=int(K), fit_intercept=False)
+        omp.fit(A_norm, Yw)
+        S = (omp.coef_ / col_norms).T
+        return np.clip(np.real(W.T @ S @ W), 0, 1)
 
 
 def decode_payload(payload):
@@ -177,10 +215,8 @@ def reconstruct_frame(payload, seed=CS_SEED):
     out_channels = []
     n_blocks = rows * cols
     for ch in range(channels):
-        blocks = []
-        for i in range(n_blocks):
-            Y = stacked[ch * n_blocks + i]
-            blocks.append(reconstruct(Y, Phi, W, K))
+        Y_blocks = [stacked[ch * n_blocks + i] for i in range(n_blocks)]
+        blocks = _reconstruct_blocks_parallel(Y_blocks, Phi, W, K)
         out_channels.append(merge_blocks(blocks, rows, cols, N, orig_h, orig_w))
 
     frame = np.stack(out_channels, axis=-1) if channels > 1 else out_channels[0]
@@ -196,8 +232,10 @@ def _encode_y_channel(y_plane, N, mr_percent, seed):
     padded = _pad_to_multiple(y_plane, N)
     blocks, rows, cols = split_blocks(padded.astype(np.float32) / 255.0, N)
 
-    all_Y = [Phi @ blk for blk in blocks]
-    stacked = np.stack(all_Y, axis=0)
+    blocks_arr = np.stack(blocks, axis=0)  # (n_blocks, N, N)
+    # Satu matmul batched (bukan loop Python per-blok) -- OpenBLAS bisa
+    # memparalelkan operasi ini lintas core, bukan cuma 1 thread.
+    stacked = Phi @ blocks_arr  # (n_blocks, M, N)
     quantized = np.clip(np.round(stacked * CS_QUANT_SCALE), -127, 127).astype(np.int8)
     compressed = gzip.compress(quantized.tobytes(), compresslevel=6)
     return compressed, M, rows, cols
@@ -251,7 +289,8 @@ def reconstruct_frame_ycbcr(payload, seed=CS_SEED):
     Phi = sensing_matrix(M, N, seed)
     W = build_dct_matrix(N)
     K = K_for(M)
-    blocks = [reconstruct(stacked[i], Phi, W, K) for i in range(rows * cols)]
+    Y_blocks = [stacked[i] for i in range(rows * cols)]
+    blocks = _reconstruct_blocks_parallel(Y_blocks, Phi, W, K)
     y_plane = merge_blocks(blocks, rows, cols, N, orig_h, orig_w)
     y_plane = np.clip(y_plane * 255.0, 0, 255).astype(np.uint8)
 

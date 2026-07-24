@@ -321,6 +321,7 @@ def info():
         "width": camera.actual_width,
         "height": camera.actual_height,
         "fps": VIDEO_FPS,
+        "csMrPercent": CS_MR_PERCENT,
     }
 
 
@@ -361,6 +362,14 @@ def on_message(client, userdata, msg):
         if cmd == "rekam": camera.request_start()
         elif cmd == "stop": camera.request_stop()
         elif cmd == "foto": camera.request_snapshot()
+        elif cmd == "set_cs_mr":
+            global CS_MR_PERCENT
+            mr = int(data.get("mr", CS_MR_PERCENT))
+            if 10 <= mr <= 100:
+                CS_MR_PERCENT = mr
+                print(f"-> CS_MR_PERCENT diubah ke {CS_MR_PERCENT}%")
+            else:
+                print(f"-> mr di luar rentang valid (10-100): {mr}")
         else: print(f"-> Perintah tidak dikenal: {cmd}")
     except (ValueError, KeyError) as e:
         # Dekripsi/autentikasi gagal — data mungkin dirusak atau key salah

@@ -66,6 +66,18 @@ def cs_quality():
     if not raw:
         return jsonify({"error": "gambar kosong"}), 400
 
+    # MR (measurement rate) opsional lewat query string, mis. ?mr=70
+    # supaya bisa diuji-coba dari frontend tanpa restart service.
+    mr_percent = cs_codec.CS_MR_PERCENT
+    mr_arg = request.args.get("mr")
+    if mr_arg is not None:
+        try:
+            mr_percent = int(mr_arg)
+        except ValueError:
+            return jsonify({"error": "parameter mr harus berupa angka"}), 400
+        if not (1 <= mr_percent <= 100):
+            return jsonify({"error": "parameter mr harus di antara 1-100"}), 400
+
     arr = np.frombuffer(raw, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
@@ -76,7 +88,7 @@ def cs_quality():
 
     t0 = time.time()
     try:
-        cs_payload = cs_codec.encode_frame_ycbcr(rgb)
+        cs_payload = cs_codec.encode_frame_ycbcr(rgb, mr_percent=mr_percent)
         recon = cs_codec.reconstruct_frame_ycbcr(cs_payload)
     except Exception as e:
         return jsonify({"error": f"simulasi CS gagal: {e}"}), 400
@@ -90,7 +102,7 @@ def cs_quality():
 
     return jsonify({
         "csType": "OMP+DCT (YCbCr, CS di channel Y)",
-        "mrPercent": cs_codec.CS_MR_PERCENT,
+        "mrPercent": mr_percent,
         "blockSize": cs_codec.CS_BLOCK_SIZE,
         "originalBytes": int(len(raw)),
         "rawPixelBytes": int(orig_size),

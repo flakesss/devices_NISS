@@ -2,15 +2,23 @@
 Compressive Sensing codec untuk NISS — dipakai bersama oleh Pi (encode) dan
 service cs-reconstruct (decode).
 
-Diporting dari eksperimen di CS_endoskop_colab_4.ipynb:
-- Basis sparse: DCT (NMSE rata-rata terendah & paling konsisten di eksperimen)
+Diporting dari notebook eksperimen pembimbing
+(simulasi_endoskop_CS_wavelet_ready.ipynb):
+- Basis sparse: Wavelet 2D (default "haar"), dibangun lewat basis sintesis
+  n x n (n = block_size^2) dari pywt.wavedec2/waverec2, mode "periodization"
+  supaya jumlah koefisien wavelet = jumlah piksel (Psi tetap persegi).
 - Sensing matrix: Bernoulli acak +-1/sqrt(M), seed tetap supaya Pi & service
   rekonstruksi menghasilkan matriks Phi yang identik tanpa perlu ditransfer
   lewat jaringan.
-- Rekonstruksi: Orthogonal Matching Pursuit (OMP), K = K_RATIO * M.
+- Blok diproses sebagai vektor flatten (bukan per-baris tile) -- 1 blok NxN
+  piksel diflatten jadi 1 vektor panjang n=N*N, sama seperti notebook.
+- Rekonstruksi: Orthogonal Matching Pursuit (OMP), K = M // 4 (dibatasi
+  1 <= K <= min(n, M-1)) -- lihat resolve_sparsity_k().
 
-Encode-side (dipakai Pi) cuma butuh numpy. Decode-side (dipakai cs-reconstruct)
-butuh scipy/scikit-learn juga -- lihat requirements.txt masing-masing service.
+Encode-side (dipakai Pi) cuma butuh numpy -- basis wavelet cuma dipakai di
+sisi rekonstruksi. Decode-side (dipakai cs-reconstruct, dan Pi utk fitur
+"Foto via CS") butuh scipy/scikit-learn/pywavelets juga -- lihat
+requirements.txt masing-masing service.
 """
 
 import gzip
@@ -18,16 +26,18 @@ import multiprocessing
 import os
 import struct
 from concurrent.futures import ProcessPoolExecutor
+from functools import lru_cache
 
 import cv2
 import numpy as np
 
 CS_SEED = 42
-CS_BASIS = "dct"
-CS_BLOCK_SIZE = 64      # N -- harus pangkat dua
+CS_BASIS = "wavelet"
+CS_WAVELET_NAME = "haar"
+CS_WAVELET_MODE = "periodization"
+CS_BLOCK_SIZE = 8       # N -- ukuran sisi blok (flatten jadi vektor n=N*N)
 CS_MR_PERCENT = 100     # measurement rate (%) default -- kualitas terbaik, penghematan dari kuantisasi int8+gzip
                         # (bukan dari mengurangi sampel), lihat catatan kuantisasi di bawah
-K_RATIO = 0.25
 
 # Kuantisasi ke int8 (bukan int16) -- separuh ukuran per sampel.
 # Skala 50 dipilih karena nilai measurement Y = Phi @ block (Phi Bernoulli
@@ -56,10 +66,10 @@ _HEADER_YCC_SIZE = struct.calcsize(_HEADER_YCC_FMT)
 
 # ───────────────────────── Encode-side (Pi, numpy only) ─────────────────────
 
-def sensing_matrix(M, N, seed=CS_SEED):
+def sensing_matrix(M, n, seed=CS_SEED):
     """Bernoulli +-1/sqrt(M), deterministik lewat seed tetap -- identik di kedua sisi."""
     rng = np.random.RandomState(seed)
-    return (2 * rng.randint(0, 2, size=(M, N)) - 1).astype(np.float32) / np.sqrt(M)
+    return (2 * rng.randint(0, 2, size=(M, n)) - 1).astype(np.float32) / np.sqrt(M)
 
 
 def _pad_to_multiple(img, block):
@@ -71,33 +81,37 @@ def _pad_to_multiple(img, block):
     return img
 
 
-def split_blocks(channel_img, N):
-    """channel_img: 2D array (H x W), sudah dipad ke kelipatan N. Return (blocks, rows, cols)."""
+def split_blocks_flat(channel_img, N):
+    """channel_img: 2D array (H x W), sudah dipad ke kelipatan N. Iris jadi blok
+    NxN row-major lalu flatten tiap blok jadi vektor panjang n=N*N.
+    Return (blocks_flat: (n_blocks, n) array, rows, cols)."""
     h, w = channel_img.shape
     rows, cols = h // N, w // N
     blocks = []
     for r in range(rows):
         for c in range(cols):
-            blocks.append(channel_img[r * N:(r + 1) * N, c * N:(c + 1) * N])
-    return blocks, rows, cols
+            blocks.append(channel_img[r * N:(r + 1) * N, c * N:(c + 1) * N].reshape(-1))
+    return np.stack(blocks, axis=0), rows, cols
 
 
-def merge_blocks(blocks, rows, cols, N, orig_h, orig_w):
+def merge_blocks_flat(blocks_flat, rows, cols, N, orig_h, orig_w):
+    """blocks_flat: (n_blocks, n) array, n=N*N. Balikkan tiap vektor ke blok
+    NxN lalu susun row-major ke citra penuh, crop ke ukuran asli."""
     h, w = rows * N, cols * N
-    out = np.zeros((h, w), dtype=blocks[0].dtype)
-    for i, blk in enumerate(blocks):
+    out = np.zeros((h, w), dtype=blocks_flat.dtype)
+    for i in range(blocks_flat.shape[0]):
         r, c = divmod(i, cols)
-        out[r * N:(r + 1) * N, c * N:(c + 1) * N] = blk
+        out[r * N:(r + 1) * N, c * N:(c + 1) * N] = blocks_flat[i].reshape(N, N)
     return out[:orig_h, :orig_w]
 
 
 def encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT, seed=CS_SEED):
     """frame_rgb: HxWx3 uint8. Return payload biner (bytes): header + measurement
-    Y terkuantisasi int16 + gzip, per channel per block."""
-    assert (N & (N - 1)) == 0, "CS_BLOCK_SIZE harus pangkat dua"
+    Y terkuantisasi int8 + gzip, per channel per blok (blok diflatten, bukan per-baris)."""
     orig_h, orig_w = frame_rgb.shape[:2]
-    M = max(1, int(round(mr_percent / 100 * N)))
-    Phi = sensing_matrix(M, N, seed)
+    n = N * N
+    M = max(1, int(round(mr_percent / 100 * n)))
+    Phi = sensing_matrix(M, n, seed)
 
     padded = _pad_to_multiple(frame_rgb, N)
     channels = padded.shape[2] if padded.ndim == 3 else 1
@@ -107,13 +121,12 @@ def encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT, seed=CS_S
     per_channel_Y = []
     rows = cols = None
     for ch in range(channels):
-        blocks, rows, cols = split_blocks(padded[:, :, ch].astype(np.float32) / 255.0, N)
-        blocks_arr = np.stack(blocks, axis=0)  # (n_blocks, N, N)
+        blocks_flat, rows, cols = split_blocks_flat(padded[:, :, ch].astype(np.float32) / 255.0, N)
         # Satu matmul batched (bukan loop Python per-blok) -- OpenBLAS bisa
         # memparalelkan operasi ini lintas core, bukan cuma 1 thread.
-        per_channel_Y.append(Phi @ blocks_arr)  # (n_blocks, M, N)
+        per_channel_Y.append(Phi @ blocks_flat.T)  # (M, n_blocks)
 
-    stacked = np.concatenate(per_channel_Y, axis=0)  # (channels*rows*cols, M, N)
+    stacked = np.concatenate(per_channel_Y, axis=1)  # (M, channels*n_blocks)
     # Kuantisasi float -> int8 (separuh ukuran int16, lihat CS_QUANT_SCALE di atas)
     quantized = np.clip(np.round(stacked * CS_QUANT_SCALE), -127, 127).astype(np.int8)
     raw = quantized.tobytes()
@@ -123,25 +136,57 @@ def encode_frame(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT, seed=CS_S
     return header + compressed
 
 
-# ───────────────────────── Decode-side (cs-reconstruct, butuh scipy/sklearn) ─
+# ───────────────────────── Decode-side (cs-reconstruct, butuh scipy/sklearn/pywt) ─
 
-def build_dct_matrix(N):
-    n = np.arange(N)
-    k = n.reshape(-1, 1)
-    W = np.sqrt(2 / N) * np.cos(np.pi * (2 * n + 1) * k / (2 * N))
-    W[0, :] = np.sqrt(1 / N)
-    return W.astype(np.float32)
+@lru_cache(maxsize=8)
+def build_wavelet_synthesis_basis(N, wavelet_name=CS_WAVELET_NAME, mode=CS_WAVELET_MODE):
+    """Basis sintesis wavelet 2D Psi (n x n, n=N*N) -- port dari
+    make_wavelet_synthesis_basis_2d() notebook pembimbing. Setiap kolom Psi
+    adalah hasil inverse wavelet transform ketika satu koefisien wavelet
+    dibuat bernilai 1 dan sisanya 0. Cache karena Psi konstan untuk (N, wavelet,
+    mode) yang sama -- jangan dihitung ulang tiap request/tiap blok."""
+    import pywt
+
+    wavelet = pywt.Wavelet(wavelet_name)
+    max_level = pywt.dwt_max_level(data_len=N, filter_len=wavelet.dec_len)
+    if max_level < 1:
+        raise ValueError(f"Wavelet '{wavelet_name}' terlalu panjang untuk blok {N}x{N}.")
+
+    n = N * N
+    zero_block = np.zeros((N, N), dtype=np.float64)
+    template = pywt.wavedec2(zero_block, wavelet=wavelet, mode=mode, level=max_level)
+    coeff_array, coeff_slices = pywt.coeffs_to_array(template)
+    if coeff_array.size != n:
+        raise ValueError(
+            f"Jumlah koefisien wavelet ({coeff_array.size}) != jumlah piksel ({n}) -- "
+            f"gunakan mode='periodization'."
+        )
+
+    Psi = np.zeros((n, n), dtype=np.float64)
+    for j in range(n):
+        coeffs_flat = np.zeros(n, dtype=np.float64)
+        coeffs_flat[j] = 1.0
+        coeffs = pywt.array_to_coeffs(coeffs_flat.reshape(coeff_array.shape), coeff_slices, output_format="wavedec2")
+        basis_block = pywt.waverec2(coeffs, wavelet=wavelet, mode=mode)
+        basis_block = basis_block[:N, :N]
+        Psi[:, j] = basis_block.reshape(-1)
+
+    return Psi.astype(np.float32)
 
 
-def K_for(M):
-    return min(max(4, int(np.floor(K_RATIO * M))), M - 1)
+def resolve_sparsity_k(M, n, requested_k=None):
+    """Tentukan K untuk OMP -- port wavelet_resolve_sparsity_k() notebook.
+    Default K = M // 4, dibatasi 1 <= K <= min(n, M-1)."""
+    selected_k = max(1, M // 4) if requested_k is None else int(requested_k)
+    max_k = min(n, max(1, M - 1))
+    return min(selected_k, max_k) if selected_k > max_k else max(1, selected_k)
 
 
 _executor = None
 
 
 def _get_executor():
-    """Pool proses persisten (bukan thread) untuk rekonstruksi OMP per-blok --
+    """Pool proses persisten (bukan thread) untuk rekonstruksi OMP per-batch --
     OMP di sklearn tidak melepas GIL sepenuhnya, jadi cuma multiprocessing yang
     benar-benar memanfaatkan semua core CPU. Pakai spawn (bukan fork) supaya
     tidak mewarisi state proses induk (kamera/koneksi MQTT yang sedang terbuka)."""
@@ -152,21 +197,27 @@ def _get_executor():
     return _executor
 
 
-def _reconstruct_blocks_parallel(Y_blocks, Phi, W, K):
-    """Y_blocks: list of (M,N) arrays. Rekonstruksi tiap blok di proses terpisah,
-    tersebar ke semua core CPU yang tersedia. chunksize besar (bukan default 1)
-    supaya tiap worker terima banyak blok sekaligus per round-trip IPC, bukan
-    kirim satu-satu (240 round-trip terpisah bikin overhead lebih dominan
-    daripada komputasinya sendiri)."""
-    n = len(Y_blocks)
+def _reconstruct_blocks_parallel(Y_blocks, Phi, Psi, K):
+    """Y_blocks: (n_blocks_total, M) array -- tiap baris = 1 blok (measurement
+    vector) independen. Dibagi jadi beberapa batch, tiap batch direkonstruksi
+    di proses terpisah, tersebar ke semua core CPU yang tersedia. Batching di
+    sini murni pengelompokan performa (banyak blok independen dalam 1
+    panggilan OMP multi-target) -- tidak terikat geometri gambar, sama
+    seperti pola orthogonal_mp(..., batch_size=...) di notebook."""
+    n_blocks_total = Y_blocks.shape[0]
     ex = _get_executor()
     workers = os.cpu_count() or 1
-    chunksize = max(1, -(-n // (workers * 2)))  # ceil(n / (workers*2))
-    return list(ex.map(reconstruct, Y_blocks, [Phi] * n, [W] * n, [K] * n, chunksize=chunksize))
+    batch_size = max(1, -(-n_blocks_total // (workers * 2)))  # ceil(n / (workers*2))
+    batches = [Y_blocks[i:i + batch_size] for i in range(0, n_blocks_total, batch_size)]
+    results = list(ex.map(reconstruct, batches, [Phi] * len(batches), [Psi] * len(batches), [K] * len(batches)))
+    return np.concatenate(results, axis=0)
 
 
-def reconstruct(Y, Phi, W, K):
-    """Sama persis dengan notebook -- OMP di domain basis W, per kolom Y."""
+def reconstruct(Y, Phi, Psi, K):
+    """Y: (batch_n, M) -- tiap baris 1 blok (measurement vector) independen.
+    Return (batch_n, n) blok hasil rekonstruksi (domain piksel, flatten).
+    Sama pola dengan notebook: Theta = Phi @ Psi, normalisasi kolom, OMP multi
+    target dalam 1 panggilan, koreksi skala balik."""
     from sklearn.linear_model import OrthogonalMatchingPursuit
     from threadpoolctl import threadpool_limits
 
@@ -175,27 +226,30 @@ def reconstruct(Y, Phi, W, K):
     # multi-thread, N proses x M thread BLAS akan rebutan core yang sama
     # (oversubscription) dan malah lebih lambat daripada jalan serial.
     with threadpool_limits(limits=1):
-        A = Phi @ W.T
-        Yw = Y @ W.T
-        col_norms = np.linalg.norm(A, axis=0)
+        Theta = Phi @ Psi  # (M, n)
+        col_norms = np.linalg.norm(Theta, axis=0)
         col_norms[col_norms < 1e-12] = 1.0
-        A_norm = A / col_norms
+        Theta_norm = Theta / col_norms
+
+        Yw = Y.T  # (M, batch_n) -- tiap kolom = 1 blok/target, format yang diharap sklearn
         omp = OrthogonalMatchingPursuit(n_nonzero_coefs=int(K), fit_intercept=False)
-        omp.fit(A_norm, Yw)
-        S = (omp.coef_ / col_norms).T
-        return np.clip(np.real(W.T @ S @ W), 0, 1)
+        omp.fit(Theta_norm, Yw)
+        S = omp.coef_ / col_norms  # (batch_n, n) -- koreksi skala krn OMP kerja di Theta_norm
+
+        X = Psi @ S.T  # (n, batch_n)
+        return np.clip(np.real(X.T), 0, 1)  # (batch_n, n)
 
 
 def decode_payload(payload):
-    """Return (Y_blocks: list of (M,N) float32 arrays, meta dict)."""
+    """Return (Y_blocks: (n_blocks_total, M) float32 array, meta dict)."""
     header = payload[:_HEADER_SIZE]
     magic, N, M, rows, cols, orig_w, orig_h, channels = struct.unpack(_HEADER_FMT, header)
     if magic != _MAGIC:
         raise ValueError("Payload CS tidak valid (magic mismatch)")
 
     raw = gzip.decompress(payload[_HEADER_SIZE:])
-    quantized = np.frombuffer(raw, dtype=np.int8).reshape(channels * rows * cols, M, N)
-    stacked = quantized.astype(np.float32) / CS_QUANT_SCALE
+    quantized = np.frombuffer(raw, dtype=np.int8).reshape(M, channels * rows * cols)
+    stacked = quantized.astype(np.float32) / CS_QUANT_SCALE  # (M, channels*n_blocks)
 
     meta = dict(N=N, M=M, rows=rows, cols=cols, orig_w=orig_w, orig_h=orig_h, channels=channels)
     return stacked, meta
@@ -207,17 +261,18 @@ def reconstruct_frame(payload, seed=CS_SEED):
     N, M = meta["N"], meta["M"]
     rows, cols, channels = meta["rows"], meta["cols"], meta["channels"]
     orig_w, orig_h = meta["orig_w"], meta["orig_h"]
+    n = N * N
 
-    Phi = sensing_matrix(M, N, seed)
-    W = build_dct_matrix(N)
-    K = K_for(M)
+    Phi = sensing_matrix(M, n, seed)
+    Psi = build_wavelet_synthesis_basis(N)
+    K = resolve_sparsity_k(M, n)
 
-    out_channels = []
     n_blocks = rows * cols
+    out_channels = []
     for ch in range(channels):
-        Y_blocks = [stacked[ch * n_blocks + i] for i in range(n_blocks)]
-        blocks = _reconstruct_blocks_parallel(Y_blocks, Phi, W, K)
-        out_channels.append(merge_blocks(blocks, rows, cols, N, orig_h, orig_w))
+        Y_blocks = stacked[:, ch * n_blocks:(ch + 1) * n_blocks].T  # (n_blocks, M)
+        blocks_flat = _reconstruct_blocks_parallel(Y_blocks, Phi, Psi, K)
+        out_channels.append(merge_blocks_flat(blocks_flat, rows, cols, N, orig_h, orig_w))
 
     frame = np.stack(out_channels, axis=-1) if channels > 1 else out_channels[0]
     return np.clip(frame * 255.0, 0, 255).astype(np.uint8)
@@ -227,15 +282,15 @@ def reconstruct_frame(payload, seed=CS_SEED):
 
 def _encode_y_channel(y_plane, N, mr_percent, seed):
     """y_plane: 2D uint8 (H x W). Return (compressed_bytes, M, rows, cols)."""
-    M = max(1, int(round(mr_percent / 100 * N)))
-    Phi = sensing_matrix(M, N, seed)
+    n = N * N
+    M = max(1, int(round(mr_percent / 100 * n)))
+    Phi = sensing_matrix(M, n, seed)
     padded = _pad_to_multiple(y_plane, N)
-    blocks, rows, cols = split_blocks(padded.astype(np.float32) / 255.0, N)
+    blocks_flat, rows, cols = split_blocks_flat(padded.astype(np.float32) / 255.0, N)
 
-    blocks_arr = np.stack(blocks, axis=0)  # (n_blocks, N, N)
     # Satu matmul batched (bukan loop Python per-blok) -- OpenBLAS bisa
     # memparalelkan operasi ini lintas core, bukan cuma 1 thread.
-    stacked = Phi @ blocks_arr  # (n_blocks, M, N)
+    stacked = Phi @ blocks_flat.T  # (M, n_blocks)
     quantized = np.clip(np.round(stacked * CS_QUANT_SCALE), -127, 127).astype(np.int8)
     compressed = gzip.compress(quantized.tobytes(), compresslevel=6)
     return compressed, M, rows, cols
@@ -245,7 +300,6 @@ def encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT,
                         seed=CS_SEED, chroma_scale=CS_CHROMA_SCALE):
     """frame_rgb: HxWx3 uint8. CS diterapkan cuma di channel Y (luminance);
     Cb/Cr dikirim lewat subsampling + JPEG (warna asli, bukan colorization)."""
-    assert (N & (N - 1)) == 0, "CS_BLOCK_SIZE harus pangkat dua"
     orig_h, orig_w = frame_rgb.shape[:2]
 
     ycc = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2YCrCb)
@@ -281,17 +335,18 @@ def reconstruct_frame_ycbcr(payload, seed=CS_SEED):
     cr_bytes = payload[offset:offset + cr_len]; offset += cr_len
     y_compressed = payload[offset:]
 
-    # ── rekonstruksi Y lewat OMP+DCT (sama seperti sebelumnya) ──
+    # ── rekonstruksi Y lewat OMP+Wavelet ──
+    n = N * N
     raw = gzip.decompress(y_compressed)
-    quantized = np.frombuffer(raw, dtype=np.int8).reshape(rows * cols, M, N)
+    quantized = np.frombuffer(raw, dtype=np.int8).reshape(M, rows * cols)
     stacked = quantized.astype(np.float32) / CS_QUANT_SCALE
 
-    Phi = sensing_matrix(M, N, seed)
-    W = build_dct_matrix(N)
-    K = K_for(M)
-    Y_blocks = [stacked[i] for i in range(rows * cols)]
-    blocks = _reconstruct_blocks_parallel(Y_blocks, Phi, W, K)
-    y_plane = merge_blocks(blocks, rows, cols, N, orig_h, orig_w)
+    Phi = sensing_matrix(M, n, seed)
+    Psi = build_wavelet_synthesis_basis(N)
+    K = resolve_sparsity_k(M, n)
+    Y_blocks = stacked.T  # (n_blocks, M)
+    blocks_flat = _reconstruct_blocks_parallel(Y_blocks, Phi, Psi, K)
+    y_plane = merge_blocks_flat(blocks_flat, rows, cols, N, orig_h, orig_w)
     y_plane = np.clip(y_plane * 255.0, 0, 255).astype(np.uint8)
 
     # ── Cb/Cr: decode JPEG lalu upsample ke ukuran asli (warna asli, bukan tebakan) ──

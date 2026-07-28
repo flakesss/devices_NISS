@@ -38,7 +38,7 @@ services:
       - "8000"
     restart: unless-stopped
 
-  # Rekonstruksi Compressive Sensing (OMP+DCT) — menerima payload biner CS
+  # Rekonstruksi Compressive Sensing (OMP+Wavelet haar) — menerima payload biner CS
   # dari Pi lewat backend, membalas JPEG. Tidak diekspos ke publik.
   cs-reconstruct:
     build:

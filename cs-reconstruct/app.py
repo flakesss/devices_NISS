@@ -1,7 +1,7 @@
 """
 cs-reconstruct — service internal Docker Compose.
 Menerima payload biner CS (format cs_codec) dari backend, merekonstruksi
-citra RGB via OMP+DCT, lalu membalas sebagai JPEG.
+citra RGB via OMP+Wavelet(haar), lalu membalas sebagai JPEG.
 Tidak diekspos ke host/publik — cuma diakses backend lewat jaringan Docker.
 """
 
@@ -101,7 +101,7 @@ def cs_quality():
     s = float(ssim(orig_f, recon_f, channel_axis=2, data_range=1.0))
 
     return jsonify({
-        "csType": "OMP+DCT (YCbCr, CS di channel Y)",
+        "csType": "OMP+Wavelet(haar) (YCbCr, CS di channel Y)",
         "mrPercent": mr_percent,
         "blockSize": cs_codec.CS_BLOCK_SIZE,
         "originalBytes": int(len(raw)),

@@ -20,7 +20,7 @@ git pull origin main
 ```
 
 Perubahan yang akan masuk:
-- `cs_codec.py` — codec Compressive Sensing (OMP+DCT, YCbCr)
+- `cs_codec.py` — codec Compressive Sensing (OMP+Wavelet haar, YCbCr, blok 8×8)
 - `aes_utils.py` — enkripsi AES-128-GCM
 - `mqtt_server.py` — endpoint baru (`/info`, `/snapshot_cs`, `/stream_cs`) +
   enkripsi payload MQTT & CS
@@ -81,10 +81,12 @@ Ini butuh dependency tambahan (sebelumnya cuma dipakai oleh service
 `cs-reconstruct` di PC, sekarang juga dipakai langsung di Pi):
 
 ```bash
-pip3 install scipy scikit-learn scikit-image
+pip3 install scipy scikit-learn scikit-image pywavelets
 ```
 
-(`scikit-image` dipakai untuk menghitung PSNR/SSIM **asli** — dibandingkan
+(`pywavelets` dipakai untuk membangun basis sintesis Wavelet 2D yang dipakai
+OMP saat rekonstruksi on-device -- lihat `cs_codec.py`. `scikit-image` dipakai
+untuk menghitung PSNR/SSIM **asli** — dibandingkan
 terhadap frame sebelum kompresi, dihitung sesaat sebelum frame itu dibuang —
 supaya panel "Info Kompresi" bisa menampilkan angka kualitas nyata untuk
 foto yang diambil lewat toggle ini, bukan cuma MR & ukuran payload.)
@@ -104,12 +106,13 @@ toggle langsung siap dipakai kapan saja tanpa error `ModuleNotFoundError`.
 
 ## 4. (Opsional) Sesuaikan parameter Compressive Sensing
 
-Default sudah aman dipakai apa adanya (`CS_BLOCK_SIZE=64`,
-`CS_MR_PERCENT=100` — kualitas terbaik, payload tetap 8.6× lebih kecil dari
-data mentah). Kalau mau override, tambahkan ke `.env` Pi:
+Default sudah aman dipakai apa adanya (`CS_BLOCK_SIZE=8` — sama seperti
+eksperimen pembimbing, blok 8×8 diflatten jadi vektor 1D lalu direkonstruksi
+di domain Wavelet 2D, `CS_MR_PERCENT=100` — kualitas terbaik). Kalau mau
+override, tambahkan ke `.env` Pi:
 
 ```env
-CS_BLOCK_SIZE=64
+CS_BLOCK_SIZE=8
 CS_MR_PERCENT=100
 ```
 

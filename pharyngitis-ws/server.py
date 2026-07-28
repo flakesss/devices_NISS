@@ -1,6 +1,14 @@
 """
 server.py - Pharyngitis detector over WebSocket (realtime streaming).
 
+Model: YOLO object-detection (ultralytics), 2 classes "normal" / "phar".
+Diporting dari repo model terpisah (Pharyngitis, branch `yolo`) -- yolov8n
+dipilih sebagai model produksi (mAP50 0.978, ~4ms/gambar di CPU, tercepat
+di antara 6 varian yang diuji, lihat metrics/yolo_comparison.csv di repo
+model). Karena ini detector (bukan classifier), gambar tanpa area
+tenggorokan menghasilkan 0 deteksi di atas threshold -> built-in rejection
+("no_throat_detected"), bukan dipaksa masuk ke salah satu dari 2 kelas.
+
 Keeps a persistent connection so a client (browser / Raspberry Pi) can push
 frames continuously and receive predictions back with low overhead - better
 suited to realtime than one HTTP request per frame.
@@ -20,10 +28,9 @@ import os
 import time
 from pathlib import Path
 
-import torch
-import torch.nn.functional as F
+import numpy as np
 from PIL import Image
-from torchvision import transforms
+from ultralytics import YOLO
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -31,46 +38,73 @@ from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 # ── config ────────────────────────────────────────────────────────────────
-MODEL_PATH  = Path(os.environ.get("MODEL_PATH", "model_scripted.pt"))
-API_TOKEN   = os.environ.get("API_TOKEN")            # None = no auth
-IMG_SIZE    = int(os.environ.get("IMG_SIZE", "224"))
-CLASS_NAMES = ["no_pharyngitis", "pharyngitis"]
-DEVICE      = torch.device("cpu")
-STATIC_DIR  = Path(__file__).parent / "static"
+MODEL_PATH   = Path(os.environ.get("MODEL_PATH", "models/yolov8n.pt"))
+API_TOKEN    = os.environ.get("API_TOKEN")            # None = no auth
+CONF_THRESH  = float(os.environ.get("YOLO_CONF", "0.45"))
+IMG_SIZE     = int(os.environ.get("IMG_SIZE", "640"))
+# Nama kelas dataset: "normal" (tenggorokan sehat) / "phar" (pharyngitis) --
+# dipetakan ke istilah lama supaya frontend (yang cek prediction === 'pharyngitis')
+# tetap kompatibel tanpa perlu diubah.
+CLASS_MAP    = {"normal": "no_pharyngitis", "phar": "pharyngitis"}
+STATIC_DIR   = Path(__file__).parent / "static"
 
-app = FastAPI(title="Pharyngitis Detector (WebSocket)", version="1.0.0")
+app = FastAPI(title="Pharyngitis Detector (YOLO, WebSocket)", version="2.0.0")
 model = None
-
-preprocess = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
 
 
 @app.on_event("startup")
 def load_model():
     global model
     if not MODEL_PATH.exists():
-        raise RuntimeError(f"Model not found at {MODEL_PATH}. Export a scripted model first.")
-    model = torch.jit.load(str(MODEL_PATH), map_location=DEVICE)
-    model.eval()
-    print(f"Model loaded from {MODEL_PATH}")
+        raise RuntimeError(f"Model not found at {MODEL_PATH}. Taruh file .pt YOLO di path ini.")
+    model = YOLO(str(MODEL_PATH))
+    print(f"Model loaded from {MODEL_PATH} | classes: {model.names}")
 
 
 def predict_bytes(img_bytes: bytes) -> dict:
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    tensor = preprocess(img).unsqueeze(0).to(DEVICE)
+    arr = np.array(img)
+
     t0 = time.perf_counter()
-    with torch.no_grad():
-        probs = F.softmax(model(tensor), dim=1)[0]
+    results = model.predict(arr, imgsz=IMG_SIZE, conf=CONF_THRESH, verbose=False)
     latency_ms = (time.perf_counter() - t0) * 1000
-    idx = int(probs.argmax().item())
+
+    boxes = results[0].boxes
+    if boxes is None or len(boxes) == 0:
+        return {
+            "prediction": "no_throat_detected",
+            "confidence": 0.0,
+            "probabilities": {"no_pharyngitis": 0.0, "pharyngitis": 0.0},
+            "latency_ms": round(latency_ms, 2),
+            "detections": 0,
+        }
+
+    # Ambil deteksi dengan confidence tertinggi sebagai hasil utama.
+    best_idx = int(boxes.conf.argmax())
+    best_cls_name = model.names[int(boxes.cls[best_idx])]
+    best_conf = float(boxes.conf[best_idx])
+
+    # Probabilitas per kelas: confidence deteksi terbaik dari tiap kelas yang
+    # muncul di frame (bukan softmax -- YOLO tidak menghasilkan distribusi
+    # tunggal per-gambar seperti classifier, jadi ini pendekatan terdekat).
+    probs_by_raw_class = {}
+    for i in range(len(boxes)):
+        raw_name = model.names[int(boxes.cls[i])]
+        conf = float(boxes.conf[i])
+        if conf > probs_by_raw_class.get(raw_name, 0.0):
+            probs_by_raw_class[raw_name] = conf
+    probabilities = {
+        CLASS_MAP.get(raw, raw): round(conf, 4) for raw, conf in probs_by_raw_class.items()
+    }
+    for mapped in CLASS_MAP.values():
+        probabilities.setdefault(mapped, 0.0)
+
     return {
-        "prediction": CLASS_NAMES[idx],
-        "confidence": round(probs[idx].item(), 4),
-        "probabilities": {CLASS_NAMES[i]: round(probs[i].item(), 4) for i in range(len(CLASS_NAMES))},
+        "prediction": CLASS_MAP.get(best_cls_name, best_cls_name),
+        "confidence": round(best_conf, 4),
+        "probabilities": probabilities,
         "latency_ms": round(latency_ms, 2),
+        "detections": int(len(boxes)),
     }
 
 

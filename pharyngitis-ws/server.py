@@ -2,12 +2,15 @@
 server.py - Pharyngitis detector over WebSocket (realtime streaming).
 
 Model: YOLO object-detection (ultralytics), 2 classes "normal" / "phar".
-Diporting dari repo model terpisah (Pharyngitis, branch `yolo`) -- yolov8n
-dipilih sebagai model produksi (mAP50 0.978, ~4ms/gambar di CPU, tercepat
-di antara 6 varian yang diuji, lihat metrics/yolo_comparison.csv di repo
-model). Karena ini detector (bukan classifier), gambar tanpa area
-tenggorokan menghasilkan 0 deteksi di atas threshold -> built-in rejection
-("no_throat_detected"), bukan dipaksa masuk ke salah satu dari 2 kelas.
+Arsitektur yolov8n dipilih sebagai model produksi (mAP50 0.978, ~4ms/gambar
+di CPU, tercepat di antara 6 varian yang diuji, lihat
+metrics/yolo_comparison.csv di repo model `Pharyngitis`, branch `yolo`).
+`models/best.pt` adalah checkpoint hasil training ulang (fine-tune dari
+yolov8n.pt) yang lebih baru -- diganti tiap kali ada model baru dari
+pembimbing/hasil training ulang, arsitektur & kelas tetap sama. Karena ini
+detector (bukan classifier), gambar tanpa area tenggorokan menghasilkan 0
+deteksi di atas threshold -> built-in rejection ("no_throat_detected"),
+bukan dipaksa masuk ke salah satu dari 2 kelas.
 
 Keeps a persistent connection so a client (browser / Raspberry Pi) can push
 frames continuously and receive predictions back with low overhead - better
@@ -38,7 +41,7 @@ from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 # ── config ────────────────────────────────────────────────────────────────
-MODEL_PATH   = Path(os.environ.get("MODEL_PATH", "models/yolov8n.pt"))
+MODEL_PATH   = Path(os.environ.get("MODEL_PATH", "models/best.pt"))
 API_TOKEN    = os.environ.get("API_TOKEN")            # None = no auth
 CONF_THRESH  = float(os.environ.get("YOLO_CONF", "0.45"))
 IMG_SIZE     = int(os.environ.get("IMG_SIZE", "640"))

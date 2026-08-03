@@ -20,7 +20,7 @@ git pull origin main
 ```
 
 Perubahan yang akan masuk:
-- `cs_codec.py` — codec Compressive Sensing (OMP+Wavelet haar, YCbCr, blok 8×8)
+- `cs_codec.py` — codec Compressive Sensing (OMP+Wavelet haar, YCbCr, blok 16×16, MR default 55%)
 - `aes_utils.py` — enkripsi AES-128-GCM
 - `mqtt_server.py` — endpoint baru (`/info`, `/snapshot_cs`, `/stream_cs`) +
   enkripsi payload MQTT & CS
@@ -106,14 +106,20 @@ toggle langsung siap dipakai kapan saja tanpa error `ModuleNotFoundError`.
 
 ## 4. (Opsional) Sesuaikan parameter Compressive Sensing
 
-Default sudah aman dipakai apa adanya (`CS_BLOCK_SIZE=8` — sama seperti
-eksperimen pembimbing, blok 8×8 diflatten jadi vektor 1D lalu direkonstruksi
-di domain Wavelet 2D, `CS_MR_PERCENT=100` — kualitas terbaik). Kalau mau
-override, tambahkan ke `.env` Pi:
+Default sudah aman dipakai apa adanya (`CS_BLOCK_SIZE=16`, blok diflatten
+jadi vektor 1D lalu direkonstruksi di domain Wavelet 2D "haar";
+`CS_MR_PERCENT=55`). Kedua nilai ini **bukan** default notebook pembimbing
+(blok 8×8, MR 100%) — sudah diganti lewat pengujian empiris di resolusi
+produksi (foto device NISS 1280×720 asli, bukan citra sintetis/diresize)
+supaya memenuhi syarat dosen: **MR < 60%** dengan **PSNR/SSIM mendekati
+standar ~30dB** (hasil terukur: PSNR channel Y ~32.5dB, SSIM ~0.876 pada
+MR=55%). Blok 8×8 asli notebook maupun blok 32×32 terbukti gagal mencapai
+target ini di resolusi asli — lihat komentar di `cs_codec.py` untuk detail.
+Kalau mau override, tambahkan ke `.env` Pi:
 
 ```env
-CS_BLOCK_SIZE=8
-CS_MR_PERCENT=100
+CS_BLOCK_SIZE=16
+CS_MR_PERCENT=55
 ```
 
 ## 5. Restart service

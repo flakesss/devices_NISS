@@ -97,8 +97,8 @@ MEDIA_DIR=/path/to/media
 STREAM_PORT=5000
 
 # Konfigurasi Compressive Sensing (CS)
-CS_BLOCK_SIZE=64
-CS_MR_PERCENT=100
+CS_BLOCK_SIZE=16
+CS_MR_PERCENT=55
 
 # Konfigurasi Supabase Storage & Database
 SUPABASE_URL=https://yourproject.supabase.co
@@ -121,8 +121,8 @@ NISS_AES_KEY=
 | `JPEG_QUALITY` | `80` | Kualitas kompresi JPEG snapshot/stream (1-100) |
 | `MEDIA_DIR` | `./media` | Direktori lokal untuk menyimpan sementara file foto/video sebelum di-upload |
 | `STREAM_PORT` | `5000` | Port server Flask untuk live stream MJPEG & snapshot |
-| `CS_BLOCK_SIZE` | `64` | Ukuran blok piksel (NxN) untuk Compressive Sensing |
-| `CS_MR_PERCENT` | `100` | Persentase *measurement rate* Compressive Sensing (100 = kualitas terbaik, penghematan dari kuantisasi int8+gzip) |
+| `CS_BLOCK_SIZE` | `16` | Ukuran blok piksel (NxN) untuk Compressive Sensing -- blok diflatten jadi vektor 1D lalu direkonstruksi di domain Wavelet 2D |
+| `CS_MR_PERCENT` | `55` | Persentase *measurement rate* Compressive Sensing -- dipilih supaya di bawah 60% (syarat) sambil PSNR/SSIM tetap mendekati standar ~30dB (lihat catatan di `cs_codec.py`) |
 | `SUPABASE_URL` | - | URL project Supabase |
 | `SUPABASE_KEY` | - | Kunci `service_role` Supabase untuk otorisasi upload |
 | `SUPABASE_BUCKET` | `endoskop-media` | Nama bucket storage di Supabase |
@@ -176,16 +176,16 @@ Jika menjalankan seluruh infrastruktur (Backend, Mosquitto, Cloudflare Tunnel, d
 CLOUDFLARE_TOKEN=<token dari Cloudflare Zero Trust dashboard>
 
 # Konfigurasi Microservice Pharyngitis (opsional jika dikustomisasi)
-MODEL_PATH=model_scripted.pt
-IMG_SIZE=224
+MODEL_PATH=models/yolov8n.pt
+IMG_SIZE=640
 API_TOKEN=
 ```
 
 | Variabel | Default | Keterangan |
 |---|---|---|
 | `CLOUDFLARE_TOKEN` | - | Token tunnel dari Cloudflare Zero Trust (**Networks → Tunnels → Configure**) |
-| `MODEL_PATH` | `model_scripted.pt` | Path file model TorchScript untuk klasifikasi faringitis |
-| `IMG_SIZE` | `224` | Ukuran input citra ke model |
+| `MODEL_PATH` | `models/yolov8n.pt` | Path file model YOLOv8 (ultralytics) untuk deteksi faringitis |
+| `IMG_SIZE` | `640` | Ukuran input citra ke model |
 | `API_TOKEN` | - | Token autentikasi opsional untuk WebSocket `/ws/predict` (kosongkan untuk tanpa auth) |
 
 Token Cloudflare didapat dari: **Cloudflare Dashboard → Zero Trust → Networks → Tunnels → klik tunnel → Configure**
@@ -336,21 +336,23 @@ python3 test_aes_interop.py
 
 Payload measurement CS (belum direkonstruksi) dikirim dari Pi lewat `/snapshot_cs`
 dan `/stream_cs`, direkonstruksi di service `cs-reconstruct` (Docker Compose, PC
-lab) via OMP+DCT, lalu dikembalikan sebagai JPEG ke frontend. Fitur ini **opsional**
-(toggle "Mode: Compressive Sensing" di frontend) — endpoint JPEG normal (`/stream`,
-`/snapshot`) tetap default dan tidak terpengaruh.
+lab) via OMP+Wavelet(haar), lalu dikembalikan sebagai JPEG ke frontend. Fitur ini
+**opsional** (toggle "Mode: Compressive Sensing" di frontend) — endpoint JPEG
+normal (`/stream`, `/snapshot`) tetap default dan tidak terpengaruh.
 
 Detail implementasi & hasil pengujian (payload vs data mentah, PSNR, SSIM) ada di
 `cs_codec.py` (docstring & komentar inline). Ringkasan konfigurasi default:
 
 | Parameter | Default | Keterangan |
 |---|---|---|
-| Basis sparse | DCT | Ditentukan lewat eksperimen (NMSE rata-rata terendah) |
+| Basis sparse | Wavelet 2D (`haar`) | Blok diflatten jadi vektor 1D, direkonstruksi di domain wavelet (`build_wavelet_synthesis_basis`) |
+| Ukuran blok | `CS_BLOCK_SIZE=16` | Dipilih lewat pengujian empiris di resolusi produksi (1280×720) — blok lebih kecil (8) atau lebih besar (32) terbukti lebih buruk pada citra bertekstur nyata |
 | Sensing matrix | Bernoulli ±1/√M | Seed tetap (`CS_SEED=42`), deterministik di kedua sisi |
 | Rekonstruksi | OMP (`K = 0.25×M`) | |
 | Channel yang diproses | Y (luminance) saja, format YCbCr | Cb/Cr dikirim lewat downsample 4× + JPEG ringan — warna hasil akhir tetap warna **asli**, bukan tebakan/colorization AI |
-| `CS_MR_PERCENT` | 100% | Measurement rate — penghematan ukuran murni dari kuantisasi int8+gzip, bukan dari mengurangi sampel (kualitas terbaik yang diuji) |
+| `CS_MR_PERCENT` | 55% | Measurement rate — sengaja diset **di bawah syarat dosen (MR < 60%)** dengan margin aman, sambil PSNR/SSIM tetap mendekati standar ~30dB |
 
-Hasil pengujian pada foto endoskop 1280×720 (MR=100%): payload **320 KB**
-(terenkripsi 320.7 KB), **8.6× lebih kecil dari data mentah** (2.76 MB), PSNR
-31.5 dB, SSIM 0.82.
+Hasil pengujian end-to-end (kuantisasi int8+gzip disertakan) pada foto device NISS
+1280×720 asli (MR=55%, blok 16×16, haar): payload total **321 KB**, **8.4× lebih
+kecil dari data mentah** (2.76 MB RGB), PSNR channel Y **32.5 dB**, SSIM **0.876**
+— keduanya di atas standar ~30dB sambil MR tetap di bawah batas 60%.

@@ -73,7 +73,7 @@ python3 -c "open('aes_key.bin','wb').write(bytes.fromhex('<HEX_KEY_DARI_BACKEND>
 
 Fitur baru: toggle "Foto via CS" di frontend, kalau diaktifkan sebelum
 menekan tombol Foto, hasil foto yang disimpan & diupload adalah **hasil
-rekonstruksi OMP+DCT** di MR yang dipilih (bukan JPEG mentah kamera) —
+rekonstruksi OMP+Wavelet(haar)** di MR yang dipilih (bukan JPEG mentah kamera) —
 supaya efek Compressive Sensing benar-benar terlihat pada foto asli, bukan
 cuma simulasi di panel "Info Kompresi".
 

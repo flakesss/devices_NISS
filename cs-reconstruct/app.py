@@ -6,7 +6,13 @@ Tidak diekspos ke host/publik — cuma diakses backend lewat jaringan Docker.
 """
 
 import io
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
@@ -21,6 +27,135 @@ app = Flask(__name__)
 @app.route("/health")
 def health():
     return {"ok": True}
+
+
+# ── Rekonstruksi CS untuk video (job asinkron) ───────────────────────────────
+# Video yang tersimpan adalah rekaman H.264 biasa (bukan hasil sensing CS asli
+# di hardware) -- fitur ini mensimulasikan encode+rekonstruksi CS per-frame di
+# atas video yang sudah ada, sama seperti "Foto via CS" tapi frame demi frame.
+# OMP ~3.4 detik/frame di resolusi produksi (lihat cs_codec.py) sehingga video
+# beberapa detik saja bisa butuh beberapa menit -- job jalan di background
+# thread, klien poll status lewat /reconstruct-video/<job_id>/status.
+_video_jobs = {}
+_video_jobs_lock = threading.Lock()
+
+
+def _run_video_job(job_id, in_path, mr_percent):
+    job = _video_jobs[job_id]
+    tmp_dir = tempfile.mkdtemp(prefix=f"csvid_{job_id}_")
+    try:
+        cap = cv2.VideoCapture(in_path)
+        if not cap.isOpened():
+            raise RuntimeError("gagal membuka video sumber")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        with _video_jobs_lock:
+            job["total"] = total
+
+        idx = 0
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            payload = cs_codec.encode_frame_ycbcr(rgb, mr_percent=mr_percent)
+            recon = cs_codec.reconstruct_frame_ycbcr(payload)
+            recon_bgr = cv2.cvtColor(recon, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(tmp_dir, f"f{idx:06d}.jpg"), recon_bgr,
+                        [cv2.IMWRITE_JPEG_QUALITY, 92])
+            idx += 1
+            with _video_jobs_lock:
+                job["progress"] = idx
+                job["percent"] = round(idx / total * 100, 1) if total else None
+        cap.release()
+
+        if idx == 0:
+            raise RuntimeError("video sumber tidak punya frame yang bisa dibaca")
+
+        out_path = os.path.join(tmp_dir, "out.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-framerate", str(fps),
+            "-i", os.path.join(tmp_dir, "f%06d.jpg"),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-movflags", "faststart",
+            out_path,
+        ], check=True)
+
+        with _video_jobs_lock:
+            job["result_path"] = out_path
+            job["status"] = "done"
+    except Exception as e:
+        with _video_jobs_lock:
+            job["status"] = "error"
+            job["error"] = str(e)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    finally:
+        try:
+            os.remove(in_path)
+        except OSError:
+            pass
+
+
+@app.route("/reconstruct-video", methods=["POST"])
+def reconstruct_video_start():
+    payload = request.get_data()
+    if not payload:
+        return jsonify({"error": "video kosong"}), 400
+
+    mr_percent = cs_codec.CS_MR_PERCENT
+    mr_arg = request.args.get("mr")
+    if mr_arg is not None:
+        try:
+            mr_percent = int(mr_arg)
+        except ValueError:
+            return jsonify({"error": "parameter mr harus berupa angka"}), 400
+        if not (1 <= mr_percent <= 100):
+            return jsonify({"error": "parameter mr harus di antara 1-100"}), 400
+
+    job_id = uuid.uuid4().hex
+    fd, in_path = tempfile.mkstemp(suffix=".mp4", prefix=f"csvidin_{job_id}_")
+    with os.fdopen(fd, "wb") as f:
+        f.write(payload)
+
+    with _video_jobs_lock:
+        _video_jobs[job_id] = {
+            "status": "processing", "progress": 0, "total": 0, "percent": 0.0,
+            "result_path": None, "error": None, "mrPercent": mr_percent,
+        }
+    t = threading.Thread(target=_run_video_job, args=(job_id, in_path, mr_percent), daemon=True)
+    t.start()
+    return jsonify({"jobId": job_id, "mrPercent": mr_percent}), 202
+
+
+@app.route("/reconstruct-video/<job_id>/status")
+def reconstruct_video_status(job_id):
+    with _video_jobs_lock:
+        job = _video_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "job tidak ditemukan"}), 404
+        return jsonify({
+            "status": job["status"], "progress": job["progress"], "total": job["total"],
+            "percent": job["percent"], "error": job["error"],
+        })
+
+
+@app.route("/reconstruct-video/<job_id>/result")
+def reconstruct_video_result(job_id):
+    with _video_jobs_lock:
+        job = _video_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "job tidak ditemukan"}), 404
+        if job["status"] != "done":
+            return jsonify({"error": "job belum selesai", "status": job["status"]}), 409
+        path = job["result_path"]
+
+    with open(path, "rb") as f:
+        data = f.read()
+    shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+    with _video_jobs_lock:
+        del _video_jobs[job_id]
+    return Response(data, mimetype="video/mp4")
 
 
 @app.route("/reconstruct", methods=["POST"])

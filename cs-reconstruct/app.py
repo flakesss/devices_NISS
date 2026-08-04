@@ -83,11 +83,17 @@ def _run_video_job(job_id, in_path, mr_percent, duration_sec=None):
         else:
             fps = header_fps
 
+        # `-framerate` (sebelum -i) = timing MASUKAN (frame_count/durasi asli,
+        # dari perhitungan di atas) -- ini yang menentukan durasi video tetap
+        # benar. `-r 24` (setelah -i) = FPS KELUARAN standar (1 detik = 24
+        # frame) -- ffmpeg otomatis duplikat/buang frame secara internal utk
+        # menyesuaikan ke 24fps TANPA mengubah durasi total.
         out_path = os.path.join(tmp_dir, "out.mp4")
         subprocess.run([
             "ffmpeg", "-y", "-loglevel", "error",
             "-framerate", str(fps),
             "-i", os.path.join(tmp_dir, "f%06d.jpg"),
+            "-r", "24",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-movflags", "faststart",
             out_path,

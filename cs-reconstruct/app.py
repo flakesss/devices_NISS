@@ -40,14 +40,14 @@ _video_jobs = {}
 _video_jobs_lock = threading.Lock()
 
 
-def _run_video_job(job_id, in_path, mr_percent):
+def _run_video_job(job_id, in_path, mr_percent, duration_sec=None):
     job = _video_jobs[job_id]
     tmp_dir = tempfile.mkdtemp(prefix=f"csvid_{job_id}_")
     try:
         cap = cv2.VideoCapture(in_path)
         if not cap.isOpened():
             raise RuntimeError("gagal membuka video sumber")
-        fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
+        header_fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         with _video_jobs_lock:
             job["total"] = total
@@ -71,6 +71,17 @@ def _run_video_job(job_id, in_path, mr_percent):
 
         if idx == 0:
             raise RuntimeError("video sumber tidak punya frame yang bisa dibaca")
+
+        # FPS dari header video sumber TIDAK bisa dipercaya -- Pi menulis video
+        # dengan VideoWriter di FPS nominal, tapi kecepatan capture riil sering
+        # meleset (beban CPU dsb), jadi frame_count/header_fps != durasi asli.
+        # Kalau durasi asli (wall-clock, dicatat Pi saat rekam) tersedia, pakai
+        # itu untuk menghitung FPS efektif -- supaya video hasil rekonstruksi
+        # panjangnya sama persis dgn rekaman asli, bukan lebih cepat/pendek.
+        if duration_sec and duration_sec > 0:
+            fps = idx / duration_sec
+        else:
+            fps = header_fps
 
         out_path = os.path.join(tmp_dir, "out.mp4")
         subprocess.run([
@@ -113,6 +124,14 @@ def reconstruct_video_start():
         if not (1 <= mr_percent <= 100):
             return jsonify({"error": "parameter mr harus di antara 1-100"}), 400
 
+    duration_sec = None
+    duration_arg = request.args.get("duration")
+    if duration_arg is not None:
+        try:
+            duration_sec = float(duration_arg)
+        except ValueError:
+            return jsonify({"error": "parameter duration harus berupa angka"}), 400
+
     job_id = uuid.uuid4().hex
     fd, in_path = tempfile.mkstemp(suffix=".mp4", prefix=f"csvidin_{job_id}_")
     with os.fdopen(fd, "wb") as f:
@@ -123,7 +142,7 @@ def reconstruct_video_start():
             "status": "processing", "progress": 0, "total": 0, "percent": 0.0,
             "result_path": None, "error": None, "mrPercent": mr_percent,
         }
-    t = threading.Thread(target=_run_video_job, args=(job_id, in_path, mr_percent), daemon=True)
+    t = threading.Thread(target=_run_video_job, args=(job_id, in_path, mr_percent, duration_sec), daemon=True)
     t.start()
     return jsonify({"jobId": job_id, "mrPercent": mr_percent}), 202
 

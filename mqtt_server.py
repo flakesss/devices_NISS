@@ -127,6 +127,7 @@ class CameraController:
         self.latest_jpeg = None
         self.latest_cs_payload = None
         self._frame_lock = threading.Lock()
+        self._last_cs_compute = 0.0
 
         # flag perintah
         self._start_req = False
@@ -178,11 +179,23 @@ class CameraController:
             # Dienkripsi AES-128-GCM (format biner mentah, bukan JSON/base64,
             # supaya tidak menambah overhead di atas payload yang sudah
             # diperkecil habis-habisan) -- konsisten dengan file upload & MQTT.
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            cs_payload = cs_codec.encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
-            cs_payload_enc = aes_utils.encrypt_bytes_raw(cs_payload)
-            with self._frame_lock:
-                self.latest_cs_payload = cs_payload_enc
+            #
+            # PENTING: encode CS (~puluhan-ratusan ms/frame di CPU Pi, lihat
+            # cs_codec.py) HANYA dihitung ulang maks ~3x/detik di sini, BUKAN
+            # tiap frame kamera. Frontend live-view CS cuma polling ~2x/detik
+            # (lihat NISSDashboard.jsx), jadi menghitung ulang tiap frame kamera
+            # (~20x/detik) jauh melebihi kebutuhan riil dan cuma membebani loop
+            # ini -- termasuk ikut memperlambat cv2.VideoWriter.write() di bawah
+            # saat merekam video (efek: rekaman video jadi jauh lebih sedikit
+            # frame riilnya dari yang seharusnya utk durasi tsb).
+            now = time.time()
+            if now - self._last_cs_compute >= 1 / 3:
+                self._last_cs_compute = now
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                cs_payload = cs_codec.encode_frame_ycbcr(frame_rgb, N=CS_BLOCK_SIZE, mr_percent=CS_MR_PERCENT)
+                cs_payload_enc = aes_utils.encrypt_bytes_raw(cs_payload)
+                with self._frame_lock:
+                    self.latest_cs_payload = cs_payload_enc
 
             # baca flag perintah
             with self._lock:
